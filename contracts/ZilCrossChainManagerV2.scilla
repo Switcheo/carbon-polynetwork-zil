@@ -1,0 +1,445 @@
+scilla_version 0
+
+import Conversions
+
+(* See: https://github.com/polynetwork/eth-contracts/blob/2.0/contracts/core/cross_chain_manager/logic/EthCrossChainManagerImplementation.sol *)
+
+(***************************************************)
+(*               Associated library                *)
+(***************************************************)
+
+library ZilCrossChainManagerV2
+
+let true = True
+let false = False
+let zero_amt = Uint128 0
+let none = None {ByStr20}
+let big_endian = BigEndian
+
+let zion_seal_length = Uint256 67     (* rlpPrefix: 2 , r: 32 , s:32 , v:1 *)
+let zion_peer_length = Uint256 93     (* rlpPrefix: 2 , pk_rlp: 70 , address_rlp: 21 *)
+let zion_address_length = Uint256 21  (* rlpPrefix: 1 , address: 20 *)
+
+(* byte constants *)
+let u0x00 = Uint32 0
+let u0x01 = Uint32 1
+let u0x08 = Uint32 8
+let u0x20 = Uint32 32
+let u0x80 = Uint32 128
+let u0xb6 = Uint32 182
+let u0xb7 = Uint32 183
+let u0xc0 = Uint32 192
+let u0xd7 = Uint32 215
+let u0xf6 = Uint32 246
+let u0xf7 = Uint32 247
+let u0x117 = Uint32 279
+
+(* Error events *)
+type Error =
+  | CodeNotOwner
+  | CodeNotPendingOwner
+  | CodeAlreadyInitialized
+
+let make_error =
+  fun (result : Error) =>
+    let result_code =
+      match result with
+      | CodeNotOwner              => Int32 -1
+      | CodeNotPendingOwner       => Int32 -2
+      | CodeAlreadyInitialized    => Int32 -3
+      end
+    in
+    { _exception : "Error"; code : result_code }
+
+let one_msg =
+  fun (msg : Message) =>
+  let nil_msg = Nil {Message} in
+  Cons {Message} msg nil_msg
+
+
+(* Zion header parsing *)
+
+type Header =
+  | Header of ByStr Uint256 (* root, number *)
+
+let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
+    fun (raw : ByStr) =>
+    fun (offset : Uint32) =>
+      (*
+        assembly {
+            k := shr(0xf8,mload(add(raw,offset)))
+            // shift word at position offset in raw by 0xf8 (248 bits)
+            // => i.e. remove last 248 bits and read the first 256-248 = 8 bits = 1 byte
+        }
+      *)
+      let res = extract_bystr1 raw offset in
+      match res with
+      | None =>
+        (* ERR! just blow up here *)
+        let exception_code = Uint32 1001 in (* make this err easy to find *)
+        let size = builtin sub u0x00 exception_code in
+        Pair {Uint32 Uint32} size offset
+      | Some pair =>
+        match pair with
+        | Pair k_bystr _ =>
+          let k = builtin to_uint32 k_bystr in
+          let lt_0x80 = builtin lt k u0x80 in
+          let lt_0xb7 = builtin lt k u0xb7 in
+          let lt_0xc0 = builtin lt k u0xc0 in
+          let lt_0xf7 = builtin lt k u0xf7 in
+          match lt_0x80 with | True =>
+          (*
+            if (k<0x80) {
+                assembly {
+                    size := 1
+                    offset_ := offset
+                }
+                return (size,offset_);
+            }
+          *)
+            let size = u0x01 in
+            Pair {Uint32 Uint32} size offset | False =>
+          match lt_0xb7 with | True =>
+            (*
+              if (k<0xb7) {
+                  assembly {
+                      size := sub(k,0x80)
+                      offset_ := add(offset,1)
+                  }
+                  return (size,offset_);
+              }
+            *)
+            let size = builtin sub k u0x80 in
+            let next_offset = builtin add offset u0x01 in
+            Pair {Uint32 Uint32} size next_offset | False =>
+          match lt_0xc0 with | True =>
+            (*
+              if (k<0xc0) {
+                  assembly {
+                      size := shr(mul(8,sub(0xd7,k)),mload(add(add(raw,offset),0x01)))
+                      // the value is at raw + offset + 1
+                      // shift is 8*(0xd7 - k) => this determines how many bytes to read in for the size
+                      // => this can be from 23 to 32 bytes
+                      // so we just need to cut the bystr from (offset + 1) to (8*(0xd7 - k)) and convert it to a uint32
+                      offset_ := add(offset,sub(k,0xb6))
+                      // next offset is offset + (k - 0xb6)
+                  }
+                  return (size,offset_);
+              }
+            *)
+            let idx = builtin add offset u0x01 in
+            let len = let x = builtin sub u0xd7 k in builtin mul x u0x08 in
+            let size_bz = builtin substr raw idx len in
+            let size = extract_uint32 big_endian size_bz u0x00 in
+            match size with
+            | None =>
+              (* ERR! just blow up here *)
+              let exception_code = Uint32 1002 in (* make this err easy to find *)
+              let s = builtin sub u0x00 exception_code in
+              Pair {Uint32 Uint32} s offset
+            | Some p => match p with | Pair s _ =>
+              let next_offset = let x = builtin sub k u0xb6 in builtin add x offset in
+              Pair {Uint32 Uint32} s next_offset
+            end end | False =>
+          match lt_0xf7 with | True =>
+            (*
+              if (k<0xf7) {
+                  assembly {
+                      size := sub(k,0xc0)
+                      offset_ := add(offset,1)
+                  }
+                  return (size,offset_);
+              }
+            *)
+            let size = builtin sub k u0xc0 in
+            let next_offset = builtin add offset u0x01 in
+            Pair {Uint32 Uint32} size next_offset
+          | False =>
+            (*
+              {
+                  assembly {
+                      size := shr(mul(8,sub(0x117,k)),mload(add(add(raw,offset),0x01)))
+                      // the value is at raw + offset + 1
+                      // shift is 8*(0x117 - k) => this determines how many bytes to read in for the size
+                      // => this can be from 14 to 31 bytes
+                      // so we just need to cut the bystr from (offset + 1) to (8*(0x117 - k)) and convert it to a uint32
+                      offset_ := add(offset,sub(k,0xf6))
+                      // next offset is offset + (k - 0xf6)
+                  }
+              }
+            *)
+            let idx = builtin add offset u0x01 in
+            let len = let x = builtin sub u0x117 k in builtin mul x u0x08 in
+            let size_bz = builtin substr raw idx len in
+            let size = extract_uint32 big_endian size_bz u0x00 in
+            match size with
+            | None =>
+              (* ERR! just blow up here *)
+              let exception_code = Uint32 1003 in (* make this err easy to find *)
+              let s = builtin sub u0x00 exception_code in
+              Pair {Uint32 Uint32} s offset
+            | Some p => match p with | Pair s _ =>
+              let next_offset = let x = builtin sub k u0xf6 in builtin add x offset in
+              Pair {Uint32 Uint32} s next_offset
+            end end
+          end
+          end
+          end
+          end
+        end
+      end
+
+let decode_header : ByStr -> Header =
+  fun (rawHeader : ByStr) =>
+  (*
+    (,uint offset) = rlpReadKind(rawHeader,0x20);
+    (header.root,) = rlpGetNextBytes(rawHeader, offset + 87); // position of Root
+    (size,offset) = rlpReadKind(rawHeader, offset + 445); // position of Difficulty
+    (header.number,) = rlpGetNextUint256(rawHeader, offset + size);  // position of Number
+  *)
+    let p = rlp_read_kind rawHeader u0x20 in
+    let root_1 = 0x00 in
+    let root = builtin to_bystr root_1 in
+    let number = Uint256 0 in
+    Header root number
+
+(***************************************************)
+(*             The contract definition             *)
+(***************************************************)
+
+contract ZilCrossChainManagerV2(
+  initial_owner: ByStr20,
+  eccd: ByStr20 with contract
+    field cur_epoch_validator_pk_bytes : ByStr,
+    field cur_epoch_start_height : Uint64,
+    field from_chain_tx_exists : Map Uint64 (Map ByStr32 Bool)
+  end
+)
+
+field contract_owner : Option ByStr20 = Some {ByStr20} initial_owner
+field pending_owner : Option ByStr20 = none
+
+(**************************************)
+(*             Procedures             *)
+(**************************************)
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw e
+end
+
+procedure ExecuteCrossChainTx(
+  toContract : ByStr20,
+  method : String,
+  args : ByStr,
+  fromContractAddr : ByStr,
+  fromChainId : Uint64
+)
+(*
+    // verify to contract valid
+    require(CallerFactory(EthCrossChainCallerFactoryAddress).isChild(_toContract), "The passed in address is not from the factory!");
+    require(_toContract!=EthCrossChainDataAddress, "Don't try to call eccd!");
+
+    (bool success, bytes memory returnData) = _toContract.call(abi.encodePacked(bytes4(keccak256(abi.encodePacked(_method, "(bytes,bytes,uint64)"))), abi.encode(_args, _fromContractAddr, _fromChainId)));
+
+    require(success == true, "EthCrossChain call business contract failed");
+
+    require(returnData.length != 0, "No return value from business contract!");
+    bool res = abi.decode(returnData, (bool));
+    require(res == true, "EthCrossChain call business contract return is not true");
+
+    return true;
+*)
+end
+
+(**************************************)
+(*        Ownership Procedures        *)
+(**************************************)
+
+procedure IsOwner(address: ByStr20)
+  maybe_current_owner <- contract_owner;
+  match maybe_current_owner with
+  | Some current_owner =>
+    is_owner = builtin eq current_owner address;
+    match is_owner with
+    | True =>
+    | False =>
+      err = CodeNotOwner;
+      ThrowError err
+    end
+  | None =>
+    err = CodeNotOwner;
+    ThrowError err
+  end
+end
+
+procedure IsPendingOwner(address: ByStr20)
+  maybe_pending_owner <- pending_owner;
+  match maybe_pending_owner with
+  | Some current_pending_owner =>
+    is_pending_owner = builtin eq current_pending_owner address;
+    match is_pending_owner with
+    | True =>
+    | False =>
+      err = CodeNotPendingOwner;
+      ThrowError err
+    end
+  | None =>
+    err = CodeNotPendingOwner;
+    ThrowError err
+  end
+end
+
+(***************************************)
+(*             Transitions             *)
+(***************************************)
+
+transition InitGenesisBlock(
+  rawHeader : ByStr
+)
+  header = decode_header rawHeader;
+
+  (* verify isInit *)
+  bz <- & eccd.cur_epoch_validator_pk_bytes;
+  is_empty = let l = builtin strlen bz in builtin eq l u0x00;
+  match is_empty with
+  | True => (* ok *)
+  | False =>
+    err = CodeAlreadyInitialized;
+    ThrowError err
+  end
+
+(*
+  // get validators
+  address[] memory validators = ECCUtils.getHeaderValidators(rawHeader);
+  require(validators.length != 0, "Given block header does not contain any validator");
+
+  // put epoch information
+  require(eccd.putCurEpochStartHeight(uint64(header.number + 1)), "Save Zion current epoch start height to Data contract failed!");
+  require(eccd.putCurEpochValidatorPkBytes(ECCUtils.encodeValidators(validators)), "Save Zion current epoch validators to Data contract failed!");
+
+  emit InitGenesisBlockEvent(header.number, rawHeader);
+  return true;
+*)
+end
+
+transition ChangeEpoch(
+  rawHeader : ByStr,
+  rawSeals : ByStr
+)
+(*
+  ECCUtils.Header memory header = ECCUtils.decodeHeader(rawHeader);
+  IEthCrossChainData eccd = IEthCrossChainData(EthCrossChainDataAddress);
+
+  // verify block.height
+  require(header.number>=eccd.getCurEpochStartHeight(), "Given block height is lower than current epoch start height");
+
+  // verify header
+  bytes memory curPkBytes = eccd.getCurEpochValidatorPkBytes();
+  address[] memory validators = ECCUtils.decodeValidators(curPkBytes);
+  address[] memory newValidators = ECCUtils.getHeaderValidators(rawHeader);
+  require(newValidators.length != 0, "Given block header does not contain any validator");
+  require(ECCUtils.verifyHeader(keccak256(rawHeader), rawSeals, validators), "Verify header failed");
+
+  // put new epoch info
+  require(eccd.putCurEpochStartHeight(uint64(header.number + 1)), "Save Zion next epoch height to Data contract failed!");
+  require(eccd.putCurEpochValidatorPkBytes(ECCUtils.encodeValidators(newValidators)), "Save Zion next epoch validators to Data contract failed!");
+
+  emit ChangeEpochEvent(header.number, rawHeader, validators, newValidators);
+  return true;
+*)
+end
+
+transition CrossChain(
+  toChainId : Uint64,
+  toContract : ByStr,
+  method : ByStr,
+  txData : ByStr
+)
+(*
+  require(CallerFactory(EthCrossChainCallerFactoryAddress).isChild(msg.sender), "The caller is child of the caller factory!");
+  uint256 txHashIndex = IEthCrossChainData(EthCrossChainDataAddress).getEthTxHashIndex();
+  bytes memory paramTxHash = ECCUtils.uint256ToBytes(txHashIndex);
+  bytes memory crossChainId = abi.encodePacked(sha256(abi.encodePacked(address(this), paramTxHash)));
+  bytes memory rawParam =
+  ECCUtils.encodeTxParam(
+      paramTxHash,
+      crossChainId,
+      ECCUtils.addressToBytes(msg.sender),
+      toChainId,
+      toContract,
+      method,
+      txData
+  );
+
+  require(IEthCrossChainData(EthCrossChainDataAddress).putEthTxHash(keccak256(rawParam)), "Save ethTxHash by index to Data contract failed!");
+
+  emit CrossChainEvent(tx.origin, paramTxHash, msg.sender, toChainId, toContract, rawParam);
+  return true;
+*)
+end
+
+transition VerifyHeaderAndExecuteTx(
+  rawHeader : ByStr,
+  rawSeals : ByStr,
+  accountProof : ByStr,
+  storageProof : ByStr,
+  rawCrossTx : ByStr
+)
+(*
+  ECCUtils.Header memory header = ECCUtils.decodeHeader(rawHeader);
+  ECCUtils.CrossTx memory crossTx = ECCUtils.decodeCrossTx(rawCrossTx);
+  IEthCrossChainData eccd = IEthCrossChainData(EthCrossChainDataAddress);
+
+  address[] memory validators = ECCUtils.decodeValidators(eccd.getCurEpochValidatorPkBytes());
+
+  // verify block.height
+  require(header.number>=eccd.getCurEpochStartHeight(), "Invalid block height");
+
+  // verify header
+  require(ECCUtils.verifyHeader(keccak256(rawHeader), rawSeals, validators), "Verify header failed");
+
+  // verify proof
+  bytes memory storageIndex = ECCUtils.getCrossTxStorageSlot(crossTx);
+  bytes memory storageValue = ECCUtils.verifyAccountProof(accountProof, header.root, ZionCrossChainManagerAddress, storageProof, storageIndex);
+  require(ECCUtils.bytesToBytes32(storageValue) == keccak256(rawCrossTx), "Verify proof failed");
+
+  // check & put tx exection information
+  require(!eccd.checkIfFromChainTxExist(crossTx.fromChainID, ECCUtils.bytesToBytes32(crossTx.txHash)), "the transaction has been executed!");
+  require(eccd.markFromChainTxExist(crossTx.fromChainID, ECCUtils.bytesToBytes32(crossTx.txHash)), "Save crosschain tx exist failed!");
+  require(crossTx.crossTxParam.toChainId == chainId, "This Tx is not aiming at this network!");
+
+  address toContract = ECCUtils.bytesToAddress(crossTx.crossTxParam.toContract);
+
+  require(_executeCrossChainTx(toContract, crossTx.crossTxParam.method, crossTx.crossTxParam.args, crossTx.crossTxParam.fromContract, crossTx.fromChainID), "Execute CrossChain Tx failed!");
+
+  emit VerifyHeaderAndExecuteTxEvent(crossTx.fromChainID, crossTx.crossTxParam.toContract, crossTx.txHash, crossTx.crossTxParam.txHash);
+
+  return true;
+*)
+end
+
+(***************************************************)
+(*              Ownership Transitions              *)
+(***************************************************)
+
+(* @dev: Transfers contract ownership to a new address. The new address must call the AcceptOwnership transition to finalize the transfer. *)
+(* @param new_owner: Address of the new contract_owner.                                                                                    *)
+transition TransferOwnership(new_owner: ByStr20)
+  IsOwner _sender;
+  o = Some {ByStr20} new_owner;
+  pending_owner := o;
+  e = {_eventname : "OwnershipTransferInitiated"; contract_owner : _sender; pending_owner : new_owner};
+  event e
+end
+
+(* @dev: Finalizes transfer of contract ownership. Must be called by the new contract_owner. *)
+transition AcceptOwnership()
+  IsPendingOwner _sender;
+  previous_contract_owner <- contract_owner;
+  o = Some {ByStr20} _sender;
+  contract_owner := o;
+  pending_owner := none;
+  e = {_eventname : "OwnershipTransferAccepted"; previous_contract_owner : previous_contract_owner; contract_owner : _sender};
+  event e
+end
