@@ -62,6 +62,15 @@ let one_msg =
 type Header =
   | Header of ByStr Uint256 (* root, number *)
 
+(* converts a Uint32 to a Uint256 *)
+let grow : Uint32 -> Uint256 =
+  fun (var : Uint32) =>
+    let maybe_big = builtin to_uint256 var in
+    match maybe_big with
+    | Some big => big
+    | None => Uint256 0 (* should never happen: u32->u256 *)
+    end
+
 let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
     fun (raw : ByStr) =>
     fun (offset : Uint32) =>
@@ -117,10 +126,10 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
               if (k<0xc0) {
                   assembly {
                       size := shr(mul(8,sub(0xd7,k)),mload(add(add(raw,offset),0x01)))
-                      // the value is at raw + offset + 1
+                      // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
                       // shift is 8*(0xd7 - k) => this determines how many bytes to read in for the size
                       // => this can be from 23 to 32 bytes
-                      // so we just need to cut the bystr from (offset + 1) to (8*(0xd7 - k)) and convert it to a uint32
+                      // so we just need to cut the raw bystr from (offset + 1) to (0xd7 - k) and convert it to a uint32
                       offset_ := add(offset,sub(k,0xb6))
                       // next offset is offset + (k - 0xb6)
                   }
@@ -128,7 +137,7 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
               }
             *)
             let idx = builtin add offset u0x01 in
-            let len = let x = builtin sub u0xd7 k in builtin mul x u0x08 in
+            let len = builtin sub u0xd7 k in (* we don't have to multiply by 8 here, as len is in bytes *)
             let size_bz = builtin substr raw idx len in
             let size = extract_uint32 big_endian size_bz u0x00 in
             match size with
@@ -159,17 +168,17 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
               {
                   assembly {
                       size := shr(mul(8,sub(0x117,k)),mload(add(add(raw,offset),0x01)))
-                      // the value is at raw + offset + 1
+                      // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
                       // shift is 8*(0x117 - k) => this determines how many bytes to read in for the size
                       // => this can be from 14 to 31 bytes
-                      // so we just need to cut the bystr from (offset + 1) to (8*(0x117 - k)) and convert it to a uint32
+                      // so we just need to cut the bystr from (offset + 1) to (0x117 - k) and convert it to a uint32
                       offset_ := add(offset,sub(k,0xf6))
                       // next offset is offset + (k - 0xf6)
                   }
               }
             *)
             let idx = builtin add offset u0x01 in
-            let len = let x = builtin sub u0x117 k in builtin mul x u0x08 in
+            let len = builtin sub u0x117 k in (* we don't have to multiply by 8 here, as len is in bytes *)
             let size_bz = builtin substr raw idx len in
             let size = extract_uint32 big_endian size_bz u0x00 in
             match size with
@@ -188,6 +197,41 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
           end
         end
       end
+
+let rlp_get_next_bytes : ByStr -> Uint32 -> Pair ByStr Uint32 =
+  fun (raw : ByStr) =>
+  fun (offset : Uint32) =>
+    (*
+      uint size;
+      (size,offset) = rlpReadKind(raw, offset);
+      _offset = size + offset;
+    *)
+    let p = rlp_read_kind raw offset in
+    match p with
+    | Pair size data_offset =>
+      let new_offset = builtin add size data_offset in
+      (*
+        assembly {
+            res := mload(0x40)
+            // load the nxt free memory addr
+            let alloc := add(0x20, mul(0x20, div(add(size,0x1f), 0x20)))
+            // required alloc is 32 + 32*((size+31)/32), i.e. (size in bytes rounded up to nearest word (256 bits) + 1) word
+            mstore(0x40, add(res,alloc))
+            // move the nxt free memory addr by alloc bits - we can probably ignore how big this buffer is, as we will only ever read in `size` bytes
+            mstore(res,size)
+            // put 1 byte size at the start of buffer
+            pop(staticcall(gas(),0x4,add(raw,offset), size, add(res,0x20), size))
+            // call datacopy precompiled contract (0x4) contract with in=(raw+offset), insize=size, out=nxt free addr, outsize=size
+            // so all this basically just puts [...size, sizebytes] into res
+        }
+      *)
+      let size_u256 = grow size in
+      let size_bz_f = builtin to_bystr32 size_u256 in (* size occupies 1 word *)
+      let size_bz = builtin to_bystr size_bz_f in
+      let data_bz = builtin substr raw data_offset size in
+      let bz = builtin concat size_bz data_bz in
+      Pair {ByStr Uint32} bz new_offset
+    end
 
 let decode_header : ByStr -> Header =
   fun (rawHeader : ByStr) =>
