@@ -15,6 +15,7 @@ let false = False
 let zero_amt = Uint128 0
 let none = None {ByStr20}
 let big_endian = BigEndian
+let padding = let x = 0x00 in builtin to_bystr x
 
 let zion_seal_length = Uint256 67     (* rlpPrefix: 2 , r: 32 , s:32 , v:1 *)
 let zion_peer_length = Uint256 93     (* rlpPrefix: 2 , pk_rlp: 70 , address_rlp: 21 *)
@@ -24,6 +25,7 @@ let zion_address_length = Uint256 21  (* rlpPrefix: 1 , address: 20 *)
 let u0x00 = Uint32 0
 let u0x01 = Uint32 1
 let u0x08 = Uint32 8
+let u0x1f = Uint32 31
 let u0x20 = Uint32 32
 let u0x80 = Uint32 128
 let u0xb6 = Uint32 182
@@ -70,6 +72,17 @@ let grow : Uint32 -> Uint256 =
     | Some big => big
     | None => Uint256 0 (* should never happen: u32->u256 *)
     end
+
+(* left pads a byte string with 0s *)
+let pad : ByStr -> Uint32 -> ByStr =
+  fun (buffer : ByStr) =>
+  fun (required_length : Uint32) =>
+    let current_length = builtin strlen buffer in
+    let padding_length = builtin sub required_length current_length in
+    let fold = @nat_fold ByStr in
+    let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat padding cur in
+    let count = builtin to_nat padding_length in
+    fold fn buffer count
 
 let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
     fun (raw : ByStr) =>
@@ -139,7 +152,8 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
             let idx = builtin add offset u0x01 in
             let len = builtin sub u0xd7 k in (* we don't have to multiply by 8 here, as len is in bytes *)
             let size_bz = builtin substr raw idx len in
-            let size = extract_uint32 big_endian size_bz u0x00 in
+            let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
+            let size = extract_uint32 big_endian size_bz_padded u0x00 in
             match size with
             | None =>
               (* ERR! just blow up here *)
@@ -180,7 +194,8 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
             let idx = builtin add offset u0x01 in
             let len = builtin sub u0x117 k in (* we don't have to multiply by 8 here, as len is in bytes *)
             let size_bz = builtin substr raw idx len in
-            let size = extract_uint32 big_endian size_bz u0x00 in
+            let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
+            let size = extract_uint32 big_endian size_bz_padded u0x00 in
             match size with
             | None =>
               (* ERR! just blow up here *)
@@ -215,9 +230,9 @@ let rlp_get_next_bytes : ByStr -> Uint32 -> Pair ByStr Uint32 =
             res := mload(0x40)
             // load the nxt free memory addr
             let alloc := add(0x20, mul(0x20, div(add(size,0x1f), 0x20)))
-            // required alloc is 32 + 32*((size+31)/32), i.e. (size in bytes rounded up to nearest word (256 bits) + 1) word
+            // required alloc is 32 + 32*((size+31)/32), i.e. (size in bytes rounded up to nearest word (32 bytes / 256 bits) + 1) word
             mstore(0x40, add(res,alloc))
-            // move the nxt free memory addr by alloc bits - we can probably ignore how big this buffer is, as we will only ever read in `size` bytes
+            // move the nxt free memory addr by alloc bits
             mstore(res,size)
             // put 1 byte size at the start of buffer
             pop(staticcall(gas(),0x4,add(raw,offset), size, add(res,0x20), size))
@@ -226,10 +241,12 @@ let rlp_get_next_bytes : ByStr -> Uint32 -> Pair ByStr Uint32 =
         }
       *)
       let size_u256 = grow size in
-      let size_bz_f = builtin to_bystr32 size_u256 in (* size occupies 1 word *)
-      let size_bz = builtin to_bystr size_bz_f in
+      let size_bz_fixed = builtin to_bystr32 size_u256 in (* size occupies 1 word *)
+      let size_bz = builtin to_bystr size_bz_fixed in
       let data_bz = builtin substr raw data_offset size in
-      let bz = builtin concat size_bz data_bz in
+      let required_size = let x = builtin add size u0x1f in let y = builtin div x u0x20 in let z = builtin add y u0x01 in builtin mul z u0x20 in
+      let data_bz_padded = pad data_bz required_size in
+      let bz = builtin concat size_bz data_bz_padded in
       Pair {ByStr Uint32} bz new_offset
     end
 
