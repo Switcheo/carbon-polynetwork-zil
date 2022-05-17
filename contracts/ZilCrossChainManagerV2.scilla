@@ -1,6 +1,6 @@
 scilla_version 0
 
-import Conversions
+import Conversions PairUtils ListUtils NatUtils
 
 (* See: https://github.com/polynetwork/eth-contracts/blob/2.0/contracts/core/cross_chain_manager/logic/EthCrossChainManagerImplementation.sol *)
 
@@ -13,20 +13,28 @@ library ZilCrossChainManagerV2
 let true = True
 let false = False
 let zero_amt = Uint128 0
+let one = Uint256 1
 let none = None {ByStr20}
 let big_endian = BigEndian
 let padding = let x = 0x00 in builtin to_bystr x
+let nil_address = 0x0000000000000000000000000000000000000000
+let address_list_length = @list_length ByStr20
 
-let zion_seal_length = Uint256 67     (* rlpPrefix: 2 , r: 32 , s:32 , v:1 *)
-let zion_peer_length = Uint256 93     (* rlpPrefix: 2 , pk_rlp: 70 , address_rlp: 21 *)
-let zion_address_length = Uint256 21  (* rlpPrefix: 1 , address: 20 *)
+let zion_seal_length = Uint32 67     (* rlpPrefix: 2 , r: 32 , s:32 , v:1 *)
+let zion_peer_length = Uint32 93     (* rlpPrefix: 2 , pk_rlp: 70 , address_rlp: 21 *)
+let zion_address_length = Uint32 21  (* rlpPrefix: 1 , address: 20 *)
 
 (* byte constants *)
 let u0x00 = Uint32 0
 let u0x01 = Uint32 1
+let u0x02 = Uint32 2
+let u0x03 = Uint32 3
 let u0x08 = Uint32 8
+let u0x0c = Uint32 12
+let u0x14 = Uint32 20
 let u0x1f = Uint32 31
 let u0x20 = Uint32 32
+let u0x40 = Uint32 64
 let u0x80 = Uint32 128
 let u0xb6 = Uint32 182
 let u0xb7 = Uint32 183
@@ -41,6 +49,8 @@ type Error =
   | CodeNotOwner
   | CodeNotPendingOwner
   | CodeAlreadyInitialized
+  | CodeNoValidatorsInHeader
+  | CodeBlockHeightTooLow
 
 let make_error =
   fun (result : Error) =>
@@ -49,6 +59,8 @@ let make_error =
       | CodeNotOwner              => Int32 -1
       | CodeNotPendingOwner       => Int32 -2
       | CodeAlreadyInitialized    => Int32 -3
+      | CodeNoValidatorsInHeader  => Int32 -4
+      | CodeBlockHeightTooLow     => Int32 -5
       end
     in
     { _exception : "Error"; code : result_code }
@@ -64,6 +76,13 @@ let one_msg =
 type Header =
   | Header of ByStr Uint256 (* root, number *)
 
+let get_number : Header -> Uint256 =
+  fun (h : Header) =>
+  match h with
+  | Header root number =>
+    number
+  end
+
 (* converts a Uint32 to a Uint256 *)
 let grow : Uint32 -> Uint256 =
   fun (var : Uint32) =>
@@ -71,6 +90,25 @@ let grow : Uint32 -> Uint256 =
     match maybe_big with
     | Some big => big
     | None => Uint256 0 (* should never happen: u32->u256 *)
+    end
+
+(* extracts the address from Pair (address, offset) *)
+let get_address : Pair ByStr20 Uint32 -> ByStr20 = @fst ByStr20 Uint32
+
+(* extracts the data from Pair (data, offset) *)
+let get_data : Pair ByStr Uint32 -> ByStr = @fst ByStr Uint32
+
+(* extracts the size from Pair (size, offset) *)
+let get_size : Pair Uint32 Uint32 -> Uint32 = @fst Uint32 Uint32
+
+(* extracts the offset from Pair (size, offset) *)
+let get_offset : Pair Uint32 Uint32 -> Uint32 = @snd Uint32 Uint32
+
+(* extracts the size + offset from Pair (size, offset) *)
+let get_data_offset : Pair Uint32 Uint32 -> Uint32 =
+  fun (pair : Pair Uint32 Uint32) =>
+    match pair with
+    | Pair size offset => builtin add size offset
     end
 
 (* left pads a byte string with 0s *)
@@ -213,6 +251,41 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
         end
       end
 
+(* NOTE: do NOT use `raw` with offset < returned offset as it has not been modified. *)
+let rlp_split : ByStr -> Uint32 -> Pair ByStr Uint32 =
+  fun (raw : ByStr) =>
+  fun (offset : Uint32) =>
+    (*
+      uint size;
+      (size,offset_) = rlpReadKind(raw,offset);
+      // [offset_,...offset_+size]
+      assembly {
+          mstore(add(raw,sub(offset_,0x20)),size)
+          // write size into the 32 bytes before the data
+          // [offset_-32,...,offset_,...,offset_+size]
+          res := add(raw,sub(offset_,0x20))
+          // return next offset starting from the size
+          // [res,...,offset_,...,offset_+size]
+          offset_ := add(offset_,size)
+          // replace offset_ to end
+          // [res,...,o,...,offset_,...]
+      }
+    *)
+    let p = rlp_read_kind raw offset in
+    match p with
+    | Pair size data_offset =>
+      (* pad size to 32 bytes *)
+      let len = builtin strlen raw in
+      let data_len = builtin sub len data_offset in
+      let size_bz_fixed = builtin to_bystr4 size in
+      let size_bz = builtin to_bystr size_bz_fixed in
+      let size_bz_padded = pad size_bz u0x20 in
+      let data_bz = builtin substr raw data_offset data_len in
+      let res_bz = builtin concat size_bz_padded data_bz in
+      let next_offset = builtin add size data_offset in
+      Pair {ByStr Uint32} res_bz next_offset
+    end
+
 let rlp_get_next_bytes : ByStr -> Uint32 -> Pair ByStr Uint32 =
   fun (raw : ByStr) =>
   fun (offset : Uint32) =>
@@ -250,6 +323,78 @@ let rlp_get_next_bytes : ByStr -> Uint32 -> Pair ByStr Uint32 =
       Pair {ByStr Uint32} bz new_offset
     end
 
+let rlp_get_next_uint256 : ByStr -> Uint32 -> Pair Uint256 Uint32 =
+  fun (raw : ByStr) =>
+  fun (offset : Uint32) =>
+    (*
+      uint size;
+      (size,offset) = rlpReadKind(raw, offset);
+      require(size<=32,"rlpGetNextUint256: data longer than 32 bytes");
+      // this is auto-checked with builtin sub
+      _offset = size + offset;
+      assembly {
+          let pad := sub(0x20,size)
+          // padding is 32 - size
+          res := shr(mul(pad,8), shl(mul(pad,8), mload(add(raw,sub(offset,pad)))))
+          // load word at (offset - pad), meaning there is pad bytes worth of useless data on the left
+          // then shift left then shift right by pad bytes, i.e. this zeroes out pad bytes on the left
+      }
+    *)
+    let p = rlp_read_kind raw offset in
+    match p with
+    | Pair size data_offset =>
+      (* we just read the required size and pad left to 0x20 *)
+      let bz = builtin substr raw data_offset u0x20 in
+      let bz_padded = pad bz u0x20 in
+      let bz_fixed = builtin to_bystr32 bz_padded in
+      match bz_fixed with
+      | None =>
+        (* just blow up, should never happen *)
+        let exception_code = Uint256 1004 in (* make this err easy to find *)
+        let z = Uint256 0 in
+        let value = builtin sub z exception_code in
+        Pair {Uint256 Uint32} value data_offset
+      | Some b =>
+        let value = builtin to_uint256 b in
+        let next_offset = builtin add size data_offset in
+        Pair {Uint256 Uint32} value next_offset
+      end
+    end
+
+let rlp_get_next_address : ByStr -> Uint32 -> Pair ByStr20 Uint32 =
+  fun (raw : ByStr) =>
+  fun (offset : Uint32) =>
+  (*
+    uint size;
+    (size,offset) = rlpReadKind(raw, offset);
+    require(size<=0x14,"rlpGetNextAddress: data longer than 20 bytes");
+    _offset = size + offset;
+    assembly {
+        let pad := sub(0x20,size)
+        res := shr(mul(pad,8), shl(mul(pad,8), mload(add(raw,sub(offset,pad)))))
+        // load size bytes into a 32 byte buffer, padding the left bytes with zeroes
+        // (see: same as in rlp_get_next_uint256 above)
+    }
+  *)
+  let p = rlp_read_kind raw offset in
+  match p with
+  | Pair size data_offset =>
+    let check = builtin sub u0x14 size in
+    let bz = builtin substr raw data_offset u0x20 in
+    let bz_padded = pad bz u0x20 in
+    let m = builtin to_bystr20 bz_padded in
+    match m with
+    | None =>
+        (* ERR! just blow up here *)
+        let exception_code = Uint32 1005 in (* make this err easy to find *)
+        let next_offset = builtin sub u0x00 exception_code in
+        Pair {ByStr20 Uint32} nil_address next_offset
+    | Some bz_fixed =>
+      let next_offset = builtin add size offset in
+      Pair {ByStr20 Uint32} bz_fixed next_offset
+    end
+  end
+
 let decode_header : ByStr -> Header =
   fun (rawHeader : ByStr) =>
   (*
@@ -258,11 +403,228 @@ let decode_header : ByStr -> Header =
     (size,offset) = rlpReadKind(rawHeader, offset + 445); // position of Difficulty
     (header.number,) = rlpGetNextUint256(rawHeader, offset + size);  // position of Number
   *)
-    let p = rlp_read_kind rawHeader u0x20 in
-    let root_1 = 0x00 in
-    let root = builtin to_bystr root_1 in
-    let number = Uint256 0 in
-    Header root number
+    let p1 = rlp_read_kind rawHeader u0x20 in
+    let offset = get_offset p1 in
+    let o2 = let x = Uint32 87 in builtin add offset x in
+    let p2 = rlp_get_next_bytes rawHeader o2 in
+    match p2 with
+    | Pair root _ =>
+      let o3 = let x = Uint32 445 in builtin add offset x in
+      let p3 = rlp_read_kind rawHeader o3 in
+      match p3 with
+      | Pair size offset2 =>
+        let o4 = builtin add offset2 size in
+        let p4 = rlp_get_next_uint256 rawHeader o4 in
+        match p4 with
+        | Pair number _ =>
+          Header root number
+        end
+      end
+    end
+
+let get_validators_from_header : ByStr -> List ByStr20 =
+  fun (rawHeader : ByStr) =>
+  (*
+    (,uint offset) = rlpReadKind(rawHeader,0x20);
+    (size,offset) = rlpReadKind(rawHeader, offset + 445 ); // position of Difficulty
+    (size,offset) = rlpReadKind(rawHeader, offset + size); // position of Number
+    (size,offset) = rlpReadKind(rawHeader, offset + size); // position of GasLimit
+    (size,offset) = rlpReadKind(rawHeader, offset + size); // position of GasUsed
+    (size,offset) = rlpReadKind(rawHeader, offset + size); // position of Time
+    (bytes memory extra,) = rlpGetNextBytes(rawHeader, offset + size);
+    (bytes memory validatorsBytes,) = rlpGetNextBytes(extra, 0x40);
+    (size, offset) = rlpReadKind(validatorsBytes, 0x20);
+    require(size%ZION_ADDRESS_LEN==0,"invalid header extra validatorSet");
+    validators = new address[](size/ZION_ADDRESS_LEN);
+    for (uint i = 0; i*ZION_ADDRESS_LEN<size; i++) {
+        (address valAddr,) = rlpGetNextAddress(validatorsBytes, offset + i*ZION_ADDRESS_LEN);
+        validators[i] = valAddr;
+    }
+  *)
+  let p1 = rlp_read_kind rawHeader u0x20 in
+  let p2 = let o1 = get_offset p1 in
+           let u445 = Uint32 445 in
+           let o = builtin add u445 o1 in rlp_read_kind rawHeader o in (* position of Difficulty *)
+  let p3 = let o = get_data_offset p2 in rlp_read_kind rawHeader o in (* position of Number *)
+  let p4 = let o = get_data_offset p3 in rlp_read_kind rawHeader o in (* position of GasLimit *)
+  let p5 = let o = get_data_offset p4 in rlp_read_kind rawHeader o in (* position of GasUsed *)
+  let p6 = let o = get_data_offset p5 in rlp_read_kind rawHeader o in (* position of Time *)
+  let extra = let o = get_data_offset p6 in let b = rlp_get_next_bytes rawHeader o in get_data b in
+  let val_bz = let b = rlp_get_next_bytes extra u0x40 in get_data b in
+  let p = rlp_read_kind val_bz u0x20 in
+  match p with
+  | Pair size offset =>
+    let check = builtin rem size zion_address_length in
+    let throw_if_not_zero = builtin sub u0x00 check in
+    let length = builtin div size zion_address_length in
+    let initial = Nil {ByStr20} in
+    let count = builtin to_nat length in
+    let fold = @nat_fold (List ByStr20) in
+    let fn = fun (cur : List ByStr20) => fun (num : Nat) =>
+      let i = nat_to_int num in
+      let o = let n = builtin mul i zion_address_length in builtin add offset n in
+      let r = rlp_get_next_address val_bz o in
+      let val = get_address r in
+      Cons {ByStr20} val cur
+    in
+    (* array is constructed by pushing to the head of list - reverse to maintain right order *)
+    let array = fold fn initial count in
+    let reverse = @list_reverse ByStr20 in
+    reverse array
+  end
+
+let has_enough_signers : List ByStr20 -> List ByStr20 -> Bool =
+  fun (validators : List ByStr20) =>
+  fun (signers : List ByStr20) =>
+    (*
+        uint _m = _validators.length.mul(2).div(3).add(1);
+        bool[] memory _checked = new bool[](_validators.length);
+        uint m = 0;
+        for(uint i = 0; i < _signers.length; i++){
+            for (uint j = 0; j < _validators.length; j++) {
+                if (!_checked[j] && _signers[i]==_validators[j]) {
+                    m++;
+                    _checked[j] = true;
+                    break;
+                }
+            }
+        }
+        return m >= _m;
+    *)
+    let val_count = address_list_length validators in
+    let required = let x = builtin mul val_count u0x02 in let y = builtin div x u0x03 in builtin add y u0x01 in
+    let acc = Pair {(List ByStr20) Uint32} signers u0x00 in (* unused signers, valid signature count *)
+    let fold = @list_foldl ByStr20 (Pair (List ByStr20) Uint32) in
+    let fold_fn = fun (acc : Pair (List ByStr20) Uint32) => fun (validator : ByStr20) =>
+      match acc with
+      | Pair remaining_signers signed_count =>
+        let finder = @list_exists ByStr20 in
+        let equality_fn = fun (signer : ByStr20) => builtin eq signer validator in
+        let found = finder equality_fn signers in
+        match found with
+        | True =>
+          (* NOTE: here we assume that all validators are unique, which should be ok? *)
+          let filter = @list_filter ByStr20 in
+          let new_remaining_signers = filter equality_fn remaining_signers in
+          let new_count = builtin add signed_count u0x01 in
+          Pair {(List ByStr20) Uint32} new_remaining_signers new_count
+        | False => acc (* no change if not found *)
+        end
+      end
+    in
+    let res = fold fold_fn acc validators in
+    match res with
+    | Pair _ matched =>
+      let insufficient = builtin lt required matched in
+      match insufficient with
+      | True => False
+      | False => True
+      end
+    end
+
+let verify_seal : ByStr32 -> ByStr -> ByStr20 =
+  fun (sigHash : ByStr32) =>
+  fun (seal : ByStr) =>
+    (*
+      function verifySeal(bytes32 sigHash, bytes memory seal) internal pure returns(address signer) {
+          if (seal.length != 65) {
+              return (address(0));
+          }
+
+          bytes32 r;
+          bytes32 s;
+          uint8 v;
+
+          assembly {
+              r := mload(add(seal, 0x20))
+              s := mload(add(seal, 0x40))
+              v := add(27, byte(0, mload(add(seal, 0x60))))
+          }
+
+          // uncomment codes below if needed
+          // if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+          //     return address(0);
+          // }
+
+          // if (v != 27 && v != 28) {
+          //     return address(0);
+          // }
+
+          return ecrecover(sigHash, v, r, s);
+      }
+    *)
+    let rs = builtin substr seal u0x00 u0x40 in
+    let m1 = builtin to_bystr64 rs in
+    match m1 with
+    | None => nil_address (* shld never happen. nil addr === fail *)
+    | Some sig =>
+      let v = builtin substr seal u0x40 u0x01 in
+      let m2 = builtin to_bystr1 v in
+      match m2 with
+      | None => nil_address (* shld never happen. nil addr === fail *)
+      | Some v_fixed =>
+        let data = builtin to_bystr sigHash in
+        let recid = builtin to_uint32 v_fixed in
+        let pk = builtin ecdsa_recover_pk data sig recid in
+        let hash = builtin keccak256hash pk in
+        let hash_bz = builtin to_bystr hash in
+        let addr_bz = builtin substr hash_bz u0x0c u0x14 in (* address is last 20 bytes of pk hash, idx: 32 - 20 = 12 => u0x0c *)
+        let a = builtin to_bystr20 addr_bz in
+        match a with
+        | None => nil_address (* shld never happen. nil addr === fail *)
+        | Some addr => addr
+        end
+      end
+    end
+
+let verify_header : ByStr32 -> ByStr -> List ByStr20 -> Bool =
+  fun (headerHash : ByStr32) =>
+  fun (rawSeals : ByStr) =>
+  fun (validators : List ByStr20) =>
+    (*
+      uint offset = 0x20;
+      bytes memory seal;
+
+      (rawSeals,) = rlpSplit(rawSeals, 0x20);
+      uint sealCount = rawSeals.length.div(ZION_SEAL_LEN);
+      address[] memory signers = new address[](sealCount);
+
+      for (uint i=0; i<sealCount; i++) {
+          (seal,offset) = rlpSplit(rawSeals, offset);
+          signers[i] = verifySeal(keccak256(abi.encodePacked(headerHash)), seal);
+          if (signers[i] == address(0)) {
+              return false;
+          }
+      }
+      return hasEnoughSigners(validators, signers);
+    *)
+    let p = rlp_split rawSeals u0x20 in
+    let raw_seals_data = get_data p in
+    let raw_seals_len = builtin strlen raw_seals_data in
+    let seal_count = builtin div raw_seals_len zion_seal_length in
+    let count = builtin to_nat seal_count in
+    let signers = Nil {ByStr20} in
+    let acc = Pair {(List ByStr20) Uint32} signers u0x00 in
+    let fold = @nat_fold (Pair (List ByStr20) Uint32) in
+    let fn = fun (cur : Pair (List ByStr20) Uint32) => fun (num : Nat) =>
+      match cur with
+      | Pair signers offset =>
+        let p1 = rlp_split raw_seals_data offset in
+        match p1 with
+        | Pair seal new_offset =>
+          let header = builtin to_bystr headerHash in
+          let hash = builtin keccak256hash header in
+          let signer = verify_seal hash seal in
+          let new_list = Cons {ByStr20} signer signers in
+          Pair {(List ByStr20) Uint32} new_list new_offset
+        end
+      end
+    in
+    let res = fold fn acc count in
+    match res with
+    | Pair list _ =>
+      has_enough_signers validators list
+    end
 
 (***************************************************)
 (*             The contract definition             *)
@@ -271,8 +633,8 @@ let decode_header : ByStr -> Header =
 contract ZilCrossChainManagerV2(
   initial_owner: ByStr20,
   eccd: ByStr20 with contract
-    field cur_epoch_validator_pk_bytes : ByStr,
-    field cur_epoch_start_height : Uint64,
+    field cur_epoch_validators : List ByStr20,
+    field cur_epoch_start_height : Uint256,
     field from_chain_tx_exists : Map Uint64 (Map ByStr32 Bool)
   end
 )
@@ -287,6 +649,16 @@ field pending_owner : Option ByStr20 = none
 procedure ThrowError(err : Error)
   e = make_error err;
   throw e
+end
+
+procedure IsNotEmptyVals(vals : List ByStr20)
+  is_empty = let l = address_list_length vals in builtin eq l u0x00;
+  match is_empty with
+  | False => (* ok *)
+  | True =>
+    err = CodeNoValidatorsInHeader;
+    ThrowError err
+  end
 end
 
 procedure ExecuteCrossChainTx(
@@ -361,54 +733,74 @@ transition InitGenesisBlock(
   header = decode_header rawHeader;
 
   (* verify isInit *)
-  bz <- & eccd.cur_epoch_validator_pk_bytes;
-  is_empty = let l = builtin strlen bz in builtin eq l u0x00;
-  match is_empty with
+  cur_vals <- & eccd.cur_epoch_validators;
+  was_empty = let l = address_list_length cur_vals in builtin eq l u0x00;
+  match was_empty with
   | True => (* ok *)
   | False =>
     err = CodeAlreadyInitialized;
     ThrowError err
-  end
+  end;
 
-(*
-  // get validators
-  address[] memory validators = ECCUtils.getHeaderValidators(rawHeader);
-  require(validators.length != 0, "Given block header does not contain any validator");
+  (* get validators *)
+  vals = get_validators_from_header rawHeader;
+  IsNotEmptyVals vals;
 
-  // put epoch information
-  require(eccd.putCurEpochStartHeight(uint64(header.number + 1)), "Save Zion current epoch start height to Data contract failed!");
-  require(eccd.putCurEpochValidatorPkBytes(ECCUtils.encodeValidators(validators)), "Save Zion current epoch validators to Data contract failed!");
+  (* put epoch information *)
+  number = get_number header;
+  start_height = builtin add one number;
+  msg_to_eccd =  {
+    _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
+    epoch_start_height: start_height; epoch_validators: vals
+  };
+  msgs = one_msg msg_to_eccd;
+  send msgs;
 
-  emit InitGenesisBlockEvent(header.number, rawHeader);
-  return true;
-*)
+  e = {
+    _eventname: "GenesisBlockInitialized";
+    number: number; rawHeader: rawHeader
+  };
+  event e
 end
 
 transition ChangeEpoch(
   rawHeader : ByStr,
   rawSeals : ByStr
 )
-(*
-  ECCUtils.Header memory header = ECCUtils.decodeHeader(rawHeader);
-  IEthCrossChainData eccd = IEthCrossChainData(EthCrossChainDataAddress);
+  header = decode_header rawHeader;
+  number = get_number header;
 
-  // verify block.height
-  require(header.number>=eccd.getCurEpochStartHeight(), "Given block height is lower than current epoch start height");
+  (* verify block.height *)
+  cur_epoch_start_height <- & eccd.cur_epoch_start_height;
+  is_lower = builtin lt number cur_epoch_start_height;
+  match is_lower with
+  | False => (* ok*)
+  | True =>
+    err = CodeBlockHeightTooLow;
+    ThrowError err
+  end;
 
-  // verify header
-  bytes memory curPkBytes = eccd.getCurEpochValidatorPkBytes();
-  address[] memory validators = ECCUtils.decodeValidators(curPkBytes);
-  address[] memory newValidators = ECCUtils.getHeaderValidators(rawHeader);
-  require(newValidators.length != 0, "Given block header does not contain any validator");
-  require(ECCUtils.verifyHeader(keccak256(rawHeader), rawSeals, validators), "Verify header failed");
+  (* verify header *)
+  new_vals = get_validators_from_header rawHeader;
+  IsNotEmptyVals new_vals;
+  prev_vals <- & eccd.cur_epoch_validators;
+  hash = builtin keccak256hash rawHeader;
+  verify_header hash rawSeals prev_vals;
 
-  // put new epoch info
-  require(eccd.putCurEpochStartHeight(uint64(header.number + 1)), "Save Zion next epoch height to Data contract failed!");
-  require(eccd.putCurEpochValidatorPkBytes(ECCUtils.encodeValidators(newValidators)), "Save Zion next epoch validators to Data contract failed!");
+  (* put new epoch information *)
+  start_height = builtin add one number;
+  msg_to_eccd =  {
+    _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
+    epoch_start_height: start_height; epoch_validators: new_vals
+  };
+  msgs = one_msg msg_to_eccd;
+  send msgs;
 
-  emit ChangeEpochEvent(header.number, rawHeader, validators, newValidators);
-  return true;
-*)
+  e = {
+    _eventname: "EpochChanged";
+    number: number; rawHeader: rawHeader; previousValidators: prev_vals; newValidators: new_vals
+  };
+  event e
 end
 
 transition CrossChain(
