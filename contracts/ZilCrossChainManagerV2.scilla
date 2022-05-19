@@ -18,8 +18,11 @@ let none = None {ByStr20}
 let big_endian = BigEndian
 let padding = let x = 0x00 in builtin to_bystr x
 let nil_address = 0x0000000000000000000000000000000000000000
+let empty_abi_encoded_string = 0x000000000000000000000000000000000000000000000000000000000000000000000000
+let zion_ccm_address = 0x5747C05FF236F8d18BB21Bc02ecc389deF853cae
 let address_list_length = @list_length ByStr20
 
+let zilliqa_chain_id = Uint64 88
 let zion_seal_length = Uint32 67     (* rlpPrefix: 2 , r: 32 , s:32 , v:1 *)
 let zion_peer_length = Uint32 93     (* rlpPrefix: 2 , pk_rlp: 70 , address_rlp: 21 *)
 let zion_address_length = Uint32 21  (* rlpPrefix: 1 , address: 20 *)
@@ -40,6 +43,7 @@ let u0xb6 = Uint32 182
 let u0xb7 = Uint32 183
 let u0xc0 = Uint32 192
 let u0xd7 = Uint32 215
+let u0xe0 = Uint32 224
 let u0xf6 = Uint32 246
 let u0xf7 = Uint32 247
 let u0x117 = Uint32 279
@@ -50,17 +54,27 @@ type Error =
   | CodeNotPendingOwner
   | CodeAlreadyInitialized
   | CodeNoValidatorsInHeader
-  | CodeBlockHeightTooLow
+  | CodeHeaderVerificationFailed
+  | CodeInvalidBlockHeight
+  | CodeInvalidTxHash
+  | CodeInvalidToChainID
+  | CodeInvalidToContract
+  | CodeTxAlreadyExecuted
 
 let make_error =
   fun (result : Error) =>
     let result_code =
       match result with
-      | CodeNotOwner              => Int32 -1
-      | CodeNotPendingOwner       => Int32 -2
-      | CodeAlreadyInitialized    => Int32 -3
-      | CodeNoValidatorsInHeader  => Int32 -4
-      | CodeBlockHeightTooLow     => Int32 -5
+      | CodeNotOwner                  => Int32 -1
+      | CodeNotPendingOwner           => Int32 -2
+      | CodeAlreadyInitialized        => Int32 -3
+      | CodeNoValidatorsInHeader      => Int32 -4
+      | CodeHeaderVerificationFailed  => Int32 -5
+      | CodeInvalidBlockHeight        => Int32 -6
+      | CodeInvalidTxHash             => Int32 -7
+      | CodeInvalidToChainID          => Int32 -8
+      | CodeInvalidToContract         => Int32 -9
+      | CodeTxAlreadyExecuted         => Int32 -10
       end
     in
     { _exception : "Error"; code : result_code }
@@ -69,7 +83,6 @@ let one_msg =
   fun (msg : Message) =>
   let nil_msg = Nil {Message} in
   Cons {Message} msg nil_msg
-
 
 (* Zion header parsing *)
 
@@ -82,6 +95,24 @@ let get_number : Header -> Uint256 =
   | Header root number =>
     number
   end
+
+(* Cross chain tx params *)
+type TxParam =
+  | TxParam of
+    ByStr  (* source chain txHash *)
+    ByStr  (* crossChainId *)
+    ByStr  (* fromContract *)
+    Uint64 (* toChainId *)
+    ByStr  (* toContract *)
+    ByStr  (* method *)
+    ByStr  (* args *)
+
+
+type CrossTx =
+  | CrossTx of
+    ByStr   (* zion txHash *)
+    Uint64  (* fromChainId *)
+    TxParam (* cross chain tx param *)
 
 (* converts a Uint32 to a Uint256 *)
 let grow : Uint32 -> Uint256 =
@@ -121,6 +152,16 @@ let pad : ByStr -> Uint32 -> ByStr =
     let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat padding cur in
     let count = builtin to_nat padding_length in
     fold fn buffer count
+
+(* right pad bytes with 0s such that it is a multiple of 32 bytes (u255) *)
+let pad_bytes: ByStr -> ByStr =
+  fun (bz : ByStr) =>
+    let data_length = builtin strlen bz in
+    let padding_length = builtin rem data_length u0x20 in
+    let fold = @nat_fold ByStr in
+    let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat cur padding in
+    let count = builtin to_nat padding_length in
+    fold fn bz count
 
 let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
     fun (raw : ByStr) =>
@@ -344,7 +385,7 @@ let rlp_get_next_uint256 : ByStr -> Uint32 -> Pair Uint256 Uint32 =
     match p with
     | Pair size data_offset =>
       (* we just read the required size and pad left to 0x20 *)
-      let bz = builtin substr raw data_offset u0x20 in
+      let bz = builtin substr raw data_offset size in
       let bz_padded = pad bz u0x20 in
       let bz_fixed = builtin to_bystr32 bz_padded in
       match bz_fixed with
@@ -358,6 +399,36 @@ let rlp_get_next_uint256 : ByStr -> Uint32 -> Pair Uint256 Uint32 =
         let value = builtin to_uint256 b in
         let next_offset = builtin add size data_offset in
         Pair {Uint256 Uint32} value next_offset
+      end
+    end
+
+let rlp_get_next_uint64 : ByStr -> Uint32 -> Pair Uint64 Uint32 =
+  fun (raw : ByStr) =>
+  fun (offset : Uint32) =>
+    (*
+      // same as rlp_get_next_uint256 except size check
+      uint size;
+      (size,offset) = rlpReadKind(raw, offset);
+      require(size<=8,"rlpGetNextUint64: data longer than 8 bytes");
+      _offset = size + offset;
+      assembly {
+          let pad := sub(0x20,size)
+          res := shr(mul(pad,8), shl(mul(pad,8), mload(add(raw,sub(offset,pad)))))
+      }
+    *)
+    let r = rlp_get_next_uint256 raw offset in
+    match r with
+    | Pair i o =>
+      let small = builtin to_uint64 i in
+      match small with
+      | None =>
+        (* size check for require(size<=8,"rlpGetNextUint64: data longer than 8 bytes"); *)
+        let exception_code = Uint64 1005 in (* make this err easy to find *)
+        let z = Uint64 0 in
+        let value = builtin sub z exception_code in
+        Pair {Uint64 Uint32} value o
+      | Some u64 =>
+        Pair {Uint64 Uint32} u64 o
       end
     end
 
@@ -386,7 +457,7 @@ let rlp_get_next_address : ByStr -> Uint32 -> Pair ByStr20 Uint32 =
     match m with
     | None =>
         (* ERR! just blow up here *)
-        let exception_code = Uint32 1005 in (* make this err easy to find *)
+        let exception_code = Uint32 1006 in (* make this err easy to find *)
         let next_offset = builtin sub u0x00 exception_code in
         Pair {ByStr20 Uint32} nil_address next_offset
     | Some bz_fixed =>
@@ -612,8 +683,7 @@ let verify_header : ByStr32 -> ByStr -> List ByStr20 -> Bool =
         let p1 = rlp_split raw_seals_data offset in
         match p1 with
         | Pair seal new_offset =>
-          let header = builtin to_bystr headerHash in
-          let hash = builtin keccak256hash header in
+          let hash = builtin keccak256hash headerHash in
           let signer = verify_seal hash seal in
           let new_list = Cons {ByStr20} signer signers in
           Pair {(List ByStr20) Uint32} new_list new_offset
@@ -626,6 +696,216 @@ let verify_header : ByStr32 -> ByStr -> List ByStr20 -> Bool =
       has_enough_signers validators list
     end
 
+let abi_encode_length : Uint32 -> ByStr =
+  fun (i : Uint32) =>
+    let bz_fixed = builtin to_bystr4 i in
+    let bz = builtin to_bystr bz_fixed in
+    pad bz u0x20
+
+let append_abi_encoded_length : ByStr -> Uint32 -> ByStr =
+  fun (buffer : ByStr) =>
+  fun (i : Uint32) =>
+    let bz = abi_encode_length i in
+    builtin concat buffer bz
+
+let abi_encode_bytes : ByStr -> ByStr =
+  fun (bz : ByStr) =>
+    let len = builtin strlen bz in
+    let len_bz = abi_encode_length len in
+    let data_bz = pad_bytes bz in
+    builtin concat len_bz data_bz
+
+let next_offset : Uint32 -> ByStr -> Uint32 =
+  fun (current_offset : Uint32) =>
+  fun (bz : ByStr) =>
+    let len = builtin strlen bz in
+    builtin add current_offset len
+
+let encode_tx_param =
+  fun (txHash : ByStr) =>
+  fun (crossChainId : ByStr) =>
+  fun (fromContract : ByStr) =>
+  fun (toChainId : Uint64) =>
+  fun (toContract : ByStr) =>
+  fun (method : ByStr) =>
+  fun (args : ByStr) =>
+    (* tail: data *)
+    let t1 = abi_encode_bytes txHash in
+    let t2 = abi_encode_bytes crossChainId in
+    let t3 = abi_encode_bytes fromContract in
+    let t4 = builtin to_bystr empty_abi_encoded_string in
+    let t5 = abi_encode_bytes toContract in
+    let t6 = abi_encode_bytes method in
+    (* compute offsets *)
+    let o1 = u0xe0 in (* initial offset of 7 x 32 = 224 bytes used for headers *)
+    let o2 = next_offset o1 t1 in
+    let o3 = next_offset o2 t2 in
+    let o4 = next_offset o3 t3 in
+    let o5 = next_offset o4 t4 in
+    let o6 = next_offset o5 t5 in
+    let o7 = next_offset o6 t6 in
+    (* head: offsets *)
+    let h1 = abi_encode_length o1 in
+    let h2 = append_abi_encoded_length h1 o2 in
+    let h3 = append_abi_encoded_length h2 o3 in
+    let h4 = append_abi_encoded_length h3 o4 in (* uint64 is a fixed type *)
+    let h5 = append_abi_encoded_length h4 o5 in
+    let h6 = append_abi_encoded_length h5 o6 in
+    append_abi_encoded_length h6 o7
+    (* TODO: incomplete. may not be needed *)
+
+let decode_tx_param : ByStr -> TxParam =
+  fun (rawParam : ByStr) =>
+    (*
+      uint offset = 0x20;
+      (param.txHash,offset) = rlpGetNextBytes(rawParam, offset);
+      (param.crossChainId,offset) = rlpGetNextBytes(rawParam, offset);
+      (param.fromContract,offset) = rlpGetNextBytes(rawParam, offset);
+      (param.toChainId,offset) = rlpGetNextUint64(rawParam, offset);
+      (param.toContract,offset) = rlpGetNextBytes(rawParam, offset);
+      (param.method,offset) = rlpGetNextBytes(rawParam, offset);
+      (param.args,offset) = rlpGetNextBytes(rawParam, offset);
+    *)
+    let p1 = rlp_get_next_bytes rawParam u0x20 in match p1 with
+    | Pair tx_hash o1 =>
+    let p2 = rlp_get_next_bytes rawParam o1 in match p2 with
+    | Pair cross_chain_id o2 =>
+    let p3 = rlp_get_next_bytes rawParam o2 in match p3 with
+    | Pair from_contract o3 =>
+    let p4 = rlp_get_next_uint64 rawParam o3 in match p4 with
+    | Pair to_chain_id o4 =>
+    let p5 = rlp_get_next_bytes rawParam o4 in match p5 with
+    | Pair to_contract o5 =>
+    let p6 = rlp_get_next_bytes rawParam o5 in match p6 with
+    | Pair method o6 =>
+    let p7 = rlp_get_next_bytes rawParam o6 in match p7 with
+    | Pair args _ =>
+    TxParam tx_hash cross_chain_id from_contract to_chain_id to_contract method args
+    end end end end end end end
+
+
+let decode_cross_tx : ByStr -> CrossTx =
+  fun (rawTx : ByStr) =>
+    (*
+      uint offset = 0x20;
+      (,offset) = rlpReadKind(rawTx, offset);
+      bytes memory crossTxParam;
+      (crossTx.txHash,offset) = rlpGetNextBytes(rawTx, offset);
+      (crossTx.fromChainID,offset) = rlpGetNextUint64(rawTx, offset);
+      (crossTxParam,offset) = rlpGetNextBytes(rawTx, offset);
+      crossTx.crossTxParam = decodeTxParam(crossTxParam);
+    *)
+    let p1 = rlp_read_kind rawTx u0x20 in
+    let o1 = get_offset p1 in
+    let p2 = rlp_get_next_bytes rawTx o1 in match p2 with
+    | Pair tx_hash o2 =>
+    let p3 = rlp_get_next_uint64 rawTx o2 in match p3 with
+    | Pair from_chain_id o3 =>
+    let p4 = rlp_get_next_bytes rawTx o3 in match p4 with
+    | Pair tx_param_bz _ =>
+    let tx_param = decode_tx_param tx_param_bz in
+    CrossTx tx_hash from_chain_id tx_param
+    end end end
+
+(*
+    /*
+    Account Proof
+     -key : keccak256(address[:])
+     -val : rlp(state-obj)
+     -root : header.Root
+
+    Storage Proof
+     -key : keccak256(slot-index) // 32bytes index
+     -val : 32 bytes data
+     -root : Account.storageHash
+
+    rlp(state-obj) == rlp(Account)
+     type Account struct {
+	  Nonce    uint64
+	  Balance  *big.Int
+	  Root     bytes32   // also : storageHash
+	  CodeHash []byte
+    }
+    */
+    function verifyAccountProof(
+        bytes memory _accountProof,
+        bytes memory _headerRoot,
+        bytes memory _address,
+        bytes memory _storageProof,
+        bytes memory _storageIndex
+    ) internal pure returns(bytes memory value) {
+         // verify account proof
+        bytes memory _accountKey = _address;
+        assembly {
+            mstore(add(_accountKey,0x20), keccak256(add(_accountKey, 0x20), mload(_accountKey)))
+            mstore(_accountKey, 0x20)
+        }
+        bytes memory account = verifyProof(_accountProof, _accountKey, _headerRoot);
+
+        // decode state object
+        (account,) = rlpSplit(account,0x20);
+        (,uint offset) = rlpSplit(account,0x20); // nonce
+        (,offset) = rlpSplit(account,offset);    // balance
+        (bytes memory storageRoot,) = rlpSplit(account,offset);
+
+        // verify storage proof
+        bytes memory _storageKey = _storageIndex;
+        assembly {
+            mstore(add(_storageKey,0x20), keccak256(add(_storageKey, 0x20), mload(_storageKey)))
+            mstore(_storageKey, 0x20)
+        }
+        value = verifyProof(_storageProof, _storageKey, storageRoot);
+        (value,) = rlpSplit(value, 0x20);
+    }
+
+    // no copy , parse proof in-place , so if _proof is needed after , back up it.
+    // for proof like: rlp([rlp(node1),rlp(node2),...,rlp(nodeN)])
+    function verifyProof(bytes memory _proof, bytes memory _key, bytes memory _root) internal pure returns(bytes memory value) {
+        _key = bytesToHex(_key);
+        (_proof,) = rlpSplit(_proof,0x20); // get *[rlp(node1),rlp(node2),...,rlp(nodeN)]*
+        uint offset = 0x20;
+        uint size = _proof.length;
+        value = _root; // *value* = *_root* ( which equal *hash(rlp(node1))* )
+
+        for (;offset<size+0x20;) {
+            bytes memory node; // memory for *nodeI*
+            require(checkNodeHash(_proof,offset,value),"proof:unequal node hash"); // compare *nodeI-1.value* and *hash(rlp(nodeI))*
+            (node,offset) = rlpSplit(_proof,offset); // get *nodeI*; _proof now: *[rlp(nodeI+1),rlp(nodeI+2),...,rlp(nodeN)]*
+
+            (uint size_tmp,uint offset_tmp) = rlpReadKind(node,0x20);
+            (size_tmp,offset_tmp) = rlpReadKind(node,offset_tmp+size_tmp);
+            offset_tmp += size_tmp; // length of first two node elements
+            if (offset_tmp==node.length+0x20) { // shortNode = [rlp(key),rlp(value)]
+                (bytes memory keyElement,uint _offset) = rlpSplit(node,0x20);
+                bool isIn;
+                bytes memory subKey = compactToHex(keyElement);
+                (_key,isIn) = compareKey(_key, subKey);
+                require(isIn,"proof:invalid key");
+                (value,) = rlpSplit(node,_offset);
+            } else { // fullNode = [hash(child[0]),hash(child[1]),...,hash(child[15]),emptyKeyValue]
+                uint index;
+                if (_key.length==0) {
+                    index = 17;
+                } else {
+                    (_key,index) = takeOneByte(_key);
+                }
+                uint _offset = 0x20;
+                for (uint i=0;i<17;i++) {
+                    if (index==i) {
+                        (value,) = rlpSplit(node,_offset);
+                        break;
+                    } else {
+                        (size_tmp,offset_tmp) = rlpReadKind(node,_offset);
+                        _offset = offset_tmp + size_tmp;
+                    }
+                }
+            }
+        }
+
+        require(_key.length==0,"proof:invalid key");
+    }
+*)
+
 (***************************************************)
 (*             The contract definition             *)
 (***************************************************)
@@ -635,6 +915,7 @@ contract ZilCrossChainManagerV2(
   eccd: ByStr20 with contract
     field cur_epoch_validators : List ByStr20,
     field cur_epoch_start_height : Uint256,
+    field cur_to_zion_index : Uint256,
     field from_chain_tx_exists : Map Uint64 (Map ByStr32 Bool)
   end
 )
@@ -662,27 +943,27 @@ procedure IsNotEmptyVals(vals : List ByStr20)
 end
 
 procedure ExecuteCrossChainTx(
-  toContract : ByStr20,
-  method : String,
+  toContract : ByStr,
+  method : ByStr,
   args : ByStr,
   fromContractAddr : ByStr,
   fromChainId : Uint64
 )
-(*
-    // verify to contract valid
-    require(CallerFactory(EthCrossChainCallerFactoryAddress).isChild(_toContract), "The passed in address is not from the factory!");
-    require(_toContract!=EthCrossChainDataAddress, "Don't try to call eccd!");
-
-    (bool success, bytes memory returnData) = _toContract.call(abi.encodePacked(bytes4(keccak256(abi.encodePacked(_method, "(bytes,bytes,uint64)"))), abi.encode(_args, _fromContractAddr, _fromChainId)));
-
-    require(success == true, "EthCrossChain call business contract failed");
-
-    require(returnData.length != 0, "No return value from business contract!");
-    bool res = abi.decode(returnData, (bool));
-    require(res == true, "EthCrossChain call business contract return is not true");
-
-    return true;
-*)
+  (* TODO: ensure to_contract is not proxy or data or this contract *)
+  r = builtin to_bystr20 toContract;
+  match r with
+  | None =>
+    err = CodeInvalidToContract;
+    ThrowError err
+  | Some recipient =>
+    tag = builtin to_string method;
+    msg_to_recipient =  {
+      _tag : tag; _recipient: recipient; _amount: zero_amt;
+      args: args; fromContractAddr: fromContractAddr; fromChainId: fromChainId
+    };
+    msgs = one_msg msg_to_recipient;
+    send msgs
+  end
 end
 
 (**************************************)
@@ -776,7 +1057,7 @@ transition ChangeEpoch(
   match is_lower with
   | False => (* ok*)
   | True =>
-    err = CodeBlockHeightTooLow;
+    err = CodeInvalidBlockHeight;
     ThrowError err
   end;
 
@@ -785,7 +1066,13 @@ transition ChangeEpoch(
   IsNotEmptyVals new_vals;
   prev_vals <- & eccd.cur_epoch_validators;
   hash = builtin keccak256hash rawHeader;
-  verify_header hash rawSeals prev_vals;
+  ok = verify_header hash rawSeals prev_vals;
+  match ok with
+  | True => (* ok *)
+  | False =>
+    err = CodeHeaderVerificationFailed;
+    ThrowError err
+  end;
 
   (* put new epoch information *)
   start_height = builtin add one number;
@@ -809,27 +1096,38 @@ transition CrossChain(
   method : ByStr,
   txData : ByStr
 )
-(*
-  require(CallerFactory(EthCrossChainCallerFactoryAddress).isChild(msg.sender), "The caller is child of the caller factory!");
-  uint256 txHashIndex = IEthCrossChainData(EthCrossChainDataAddress).getEthTxHashIndex();
-  bytes memory paramTxHash = ECCUtils.uint256ToBytes(txHashIndex);
-  bytes memory crossChainId = abi.encodePacked(sha256(abi.encodePacked(address(this), paramTxHash)));
-  bytes memory rawParam =
-  ECCUtils.encodeTxParam(
-      paramTxHash,
-      crossChainId,
-      ECCUtils.addressToBytes(msg.sender),
-      toChainId,
-      toContract,
-      method,
-      txData
-  );
+  (*
+    require(CallerFactory(EthCrossChainCallerFactoryAddress).isChild(msg.sender), "The caller is child of the caller factory!");
+    uint256 txHashIndex = IEthCrossChainData(EthCrossChainDataAddress).getEthTxHashIndex();
+    bytes memory paramTxHash = ECCUtils.uint256ToBytes(txHashIndex);
+    bytes memory crossChainId = abi.encodePacked(sha256(abi.encodePacked(address(this), paramTxHash)));
+  *)
+  idx <- & eccd.cur_to_zion_index;
+  idx_bz = let b = builtin to_bystr32 idx in builtin to_bystr b;
+  id_bz = let a = builtin to_bystr _this_address in builtin concat a idx_bz;
+  cross_chain_id = let hash = builtin keccak256hash id_bz in builtin to_bystr hash;
+  sender = builtin to_bystr _sender;
+  params = TxParam idx_bz cross_chain_id sender toChainId toContract method txData;
+  tx_hash = builtin keccak256hash params;
 
-  require(IEthCrossChainData(EthCrossChainDataAddress).putEthTxHash(keccak256(rawParam)), "Save ethTxHash by index to Data contract failed!");
+  msg_to_eccd =  {
+    _tag : "PutTxHash"; _recipient: eccd; _amount: zero_amt;
+    tx_hash: tx_hash
+  };
+  msgs = one_msg msg_to_eccd;
+  send msgs;
 
-  emit CrossChainEvent(tx.origin, paramTxHash, msg.sender, toChainId, toContract, rawParam);
-  return true;
-*)
+  (* retaining v1 event format *)
+  e = {
+    _eventname : "CrossChainEvent";
+    sender : _origin;
+    txId : idx_bz;
+    proxyOrAssetContract : _sender;
+    toChainId : toChainId;
+    toContract : toContract;
+    rawdata : params
+  };
+  event e
 end
 
 transition VerifyHeaderAndExecuteTx(
@@ -839,37 +1137,86 @@ transition VerifyHeaderAndExecuteTx(
   storageProof : ByStr,
   rawCrossTx : ByStr
 )
-(*
-  ECCUtils.Header memory header = ECCUtils.decodeHeader(rawHeader);
-  ECCUtils.CrossTx memory crossTx = ECCUtils.decodeCrossTx(rawCrossTx);
-  IEthCrossChainData eccd = IEthCrossChainData(EthCrossChainDataAddress);
+  header = decode_header rawHeader;
+  cross_tx = decode_cross_tx rawCrossTx;
+  number = get_number header;
 
-  address[] memory validators = ECCUtils.decodeValidators(eccd.getCurEpochValidatorPkBytes());
+  (* verify block.height *)
+  cur_epoch_start_height <- & eccd.cur_epoch_start_height;
+  is_lower = builtin lt number cur_epoch_start_height;
+  match is_lower with
+  | False => (* ok*)
+  | True =>
+    err = CodeInvalidBlockHeight;
+    ThrowError err
+  end;
 
-  // verify block.height
-  require(header.number>=eccd.getCurEpochStartHeight(), "Invalid block height");
+  (* verify header *)
+  prev_vals <- & eccd.cur_epoch_validators;
+  hash = builtin keccak256hash rawHeader;
+  ok = verify_header hash rawSeals prev_vals;
+  match ok with
+  | True => (* ok *)
+  | False =>
+    err = CodeHeaderVerificationFailed;
+    ThrowError err
+  end;
 
-  // verify header
-  require(ECCUtils.verifyHeader(keccak256(rawHeader), rawSeals, validators), "Verify header failed");
+  (* TODO: verify proof *)
+  (*
+    bytes memory storageIndex = ECCUtils.getCrossTxStorageSlot(crossTx);
+    bytes memory storageValue = ECCUtils.verifyAccountProof(accountProof, header.root, ZionCrossChainManagerAddress, storageProof, storageIndex);
+    require(ECCUtils.bytesToBytes32(storageValue) == keccak256(rawCrossTx), "Verify proof failed");
+  *)
 
-  // verify proof
-  bytes memory storageIndex = ECCUtils.getCrossTxStorageSlot(crossTx);
-  bytes memory storageValue = ECCUtils.verifyAccountProof(accountProof, header.root, ZionCrossChainManagerAddress, storageProof, storageIndex);
-  require(ECCUtils.bytesToBytes32(storageValue) == keccak256(rawCrossTx), "Verify proof failed");
+  match cross_tx with
+  | CrossTx tx_hash from_chain_id tx_param =>
+    (* check & put tx exection information *)
+    t = builtin to_bystr32 tx_hash;
+    match t with
+    | Some tx_hash_fixed =>
+      e <- & eccd.from_chain_tx_exists[from_chain_id][tx_hash_fixed];
+      match e with
+      | None => (* ok *)
+      | Some _ =>
+        err = CodeTxAlreadyExecuted;
+        ThrowError err
+      end
+    | None =>
+      err = CodeInvalidTxHash;
+      ThrowError err
+    end;
 
-  // check & put tx exection information
-  require(!eccd.checkIfFromChainTxExist(crossTx.fromChainID, ECCUtils.bytesToBytes32(crossTx.txHash)), "the transaction has been executed!");
-  require(eccd.markFromChainTxExist(crossTx.fromChainID, ECCUtils.bytesToBytes32(crossTx.txHash)), "Save crosschain tx exist failed!");
-  require(crossTx.crossTxParam.toChainId == chainId, "This Tx is not aiming at this network!");
+    match tx_param with
+    | TxParam from_tx_hash cross_chain_id from_contract to_chain_id to_contract method args =>
+      is_right_chain = builtin eq zilliqa_chain_id to_chain_id;
+      match is_right_chain with
+      | True => (* ok *)
+      | False =>
+        err = CodeInvalidToChainID;
+        ThrowError err
+      end;
 
-  address toContract = ECCUtils.bytesToAddress(crossTx.crossTxParam.toContract);
+      msg_to_eccd =  {
+        _tag : "MarkTxExecuted"; _recipient: eccd; _amount: zero_amt;
+        from_chain_id: from_chain_id; from_tx_hash: from_tx_hash
+      };
+      msgs = one_msg msg_to_eccd;
+      send msgs;
 
-  require(_executeCrossChainTx(toContract, crossTx.crossTxParam.method, crossTx.crossTxParam.args, crossTx.crossTxParam.fromContract, crossTx.fromChainID), "Execute CrossChain Tx failed!");
+      ExecuteCrossChainTx to_contract method args from_contract from_chain_id;
 
-  emit VerifyHeaderAndExecuteTxEvent(crossTx.fromChainID, crossTx.crossTxParam.toContract, crossTx.txHash, crossTx.crossTxParam.txHash);
-
-  return true;
-*)
+      (* retain v1 events *)
+      e = {
+        _eventname: "VerifyHeaderAndExecuteTxEvent";
+        fromChainId : from_chain_id;
+        toContractAddr : to_contract;
+        crossChainTxHash : tx_hash;
+        fromChainTxHash : from_tx_hash
+      };
+      event e
+    end
+  end
 end
 
 (***************************************************)
