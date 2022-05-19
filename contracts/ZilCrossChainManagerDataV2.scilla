@@ -1,0 +1,161 @@
+scilla_version 0
+
+(* See: https://github.com/polynetwork/eth-contracts/blob/2.0/contracts/core/cross_chain_manager/data/EthCrossChainData.sol *)
+
+(***************************************************)
+(*               Associated library                *)
+(***************************************************)
+
+library ZilCrossChainManagerDataV2
+
+let true = True
+let zero = Uint256 0
+let one = Uint256 1
+let none = None {ByStr20}
+let nil_address = 0x0000000000000000000000000000000000000000
+
+type Error =
+  | CodeNotOwner
+  | CodeNotPendingOwner
+  | CodeNotCCM
+
+let make_error =
+  fun (result : Error) =>
+    let result_code =
+      match result with
+      | CodeNotOwner         => Int32 -1
+      | CodeNotPendingOwner  => Int32 -2
+      | CodeNotCCM           => Int32 -3
+      end
+    in
+    { _exception : "Error"; code : result_code }
+
+(***************************************************)
+(*             The contract definition             *)
+(***************************************************)
+
+contract ZilCrossChainManagerDataV2(
+  initial_owner: ByStr20
+)
+
+field contract_owner : Option ByStr20 = Some {ByStr20} initial_owner
+field pending_owner : Option ByStr20 = none
+
+field ccm : ByStr20 = nil_address
+field cur_epoch_validators : List ByStr20 = Nil {ByStr20}
+field cur_epoch_start_height : Uint256 = zero
+field cur_to_zion_index : Uint256 = zero
+field to_zion_tx_hashes : Map Uint256 ByStr32 = Emp Uint256 ByStr32
+field from_chain_tx_exists : Map Uint64 (Map ByStr32 Bool) = Emp Uint64 (Map ByStr32 Bool)
+
+
+(**************************************)
+(*             Procedures             *)
+(**************************************)
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw e
+end
+
+procedure IsCCM()
+  address <- ccm;
+  is_ccm = builtin eq _sender address;
+  match is_ccm with
+  | True =>
+  | False =>
+    err = CodeNotCCM;
+    ThrowError err
+  end
+end
+
+(**************************************)
+(*        Ownership Procedures        *)
+(**************************************)
+
+procedure IsOwner(address: ByStr20)
+  maybe_current_owner <- contract_owner;
+  match maybe_current_owner with
+  | Some current_owner =>
+    is_owner = builtin eq current_owner address;
+    match is_owner with
+    | True =>
+    | False =>
+      err = CodeNotOwner;
+      ThrowError err
+    end
+  | None =>
+    err = CodeNotOwner;
+    ThrowError err
+  end
+end
+
+procedure IsPendingOwner(address: ByStr20)
+  maybe_pending_owner <- pending_owner;
+  match maybe_pending_owner with
+  | Some current_pending_owner =>
+    is_pending_owner = builtin eq current_pending_owner address;
+    match is_pending_owner with
+    | True =>
+    | False =>
+      err = CodeNotPendingOwner;
+      ThrowError err
+    end
+  | None =>
+    err = CodeNotPendingOwner;
+    ThrowError err
+  end
+end
+
+(***************************************)
+(*             Transitions             *)
+(***************************************)
+
+transition PutEpochInfo(epoch_start_height: Uint256, epoch_validators: List ByStr20)
+  cur_epoch_start_height := epoch_start_height;
+  cur_epoch_validators := epoch_validators
+end
+
+transition PutTxHash(tx_hash: ByStr32)
+  idx <- cur_to_zion_index;
+  to_zion_tx_hashes[idx] := tx_hash;
+  new_idx = builtin add idx one;
+  cur_to_zion_index := new_idx
+end
+
+transition MarkTxExecuted(from_chain_id: Uint64, from_tx_hash: ByStr32)
+  from_chain_tx_exists[from_chain_id][from_tx_hash] := true
+end
+
+(***************************************************)
+(*              Ownership Transitions              *)
+(***************************************************)
+
+(* @dev: Transfers contract ownership to a new address. The new address must call the AcceptOwnership transition to finalize the transfer. *)
+(* @param new_owner: Address of the new contract_owner.                                                                                    *)
+transition TransferOwnership(new_owner: ByStr20)
+  IsOwner _sender;
+  o = Some {ByStr20} new_owner;
+  pending_owner := o;
+  e = {_eventname : "OwnershipTransferInitiated"; contract_owner : _sender; pending_owner : new_owner};
+  event e
+end
+
+(* @dev: Finalizes transfer of contract ownership. Must be called by the new contract_owner. *)
+transition AcceptOwnership()
+  IsPendingOwner _sender;
+  previous_contract_owner <- contract_owner;
+  o = Some {ByStr20} _sender;
+  contract_owner := o;
+  pending_owner := none;
+  e = {_eventname : "OwnershipTransferAccepted"; previous_contract_owner : previous_contract_owner; contract_owner : _sender};
+  event e
+end
+
+(* @dev: Sets the CCM address *)
+transition SetCCM(address: ByStr20)
+  IsOwner _sender;
+  ccm := address;
+  e = {_eventname : "CCMSet"; address : address};
+  event e
+end

@@ -1197,9 +1197,11 @@ transition VerifyHeaderAndExecuteTx(
         ThrowError err
       end;
 
+      from_tx_hash_fixed = builtin to_bystr32 from_tx_hash;
+
       msg_to_eccd =  {
         _tag : "MarkTxExecuted"; _recipient: eccd; _amount: zero_amt;
-        from_chain_id: from_chain_id; from_tx_hash: from_tx_hash
+        from_chain_id: from_chain_id; from_tx_hash: from_tx_hash_fixed
       };
       msgs = one_msg msg_to_eccd;
       send msgs;
