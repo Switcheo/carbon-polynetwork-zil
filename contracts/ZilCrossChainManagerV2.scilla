@@ -315,16 +315,9 @@ let rlp_split : ByStr -> Uint32 -> Pair ByStr Uint32 =
     let p = rlp_read_kind raw offset in
     match p with
     | Pair size data_offset =>
-      (* pad size to 32 bytes *)
-      let len = builtin strlen raw in
-      let data_len = builtin sub len data_offset in
-      let size_bz_fixed = builtin to_bystr4 size in
-      let size_bz = builtin to_bystr size_bz_fixed in
-      let size_bz_padded = pad size_bz u0x20 in
-      let data_bz = builtin substr raw data_offset data_len in
-      let res_bz = builtin concat size_bz_padded data_bz in
-      let next_offset = builtin add size data_offset in
-      Pair {ByStr Uint32} res_bz next_offset
+      let res = builtin substr raw data_offset size in (* ignore `bytes` prefix and just return the data *)
+      let next_offset = builtin add size offset in
+      Pair {ByStr Uint32} res next_offset
     end
 
 let rlp_get_next_bytes : ByStr -> Uint32 -> Pair ByStr Uint32 =
@@ -496,15 +489,15 @@ let decode_header : ByStr -> Header =
 let get_validators_from_header : ByStr -> List ByStr20 =
   fun (rawHeader : ByStr) =>
   (*
-    (,uint offset) = rlpReadKind(rawHeader,0x20);
+    (,uint offset) = rlpReadKind(rawHeader,0x20); // accounting for `bytes` prefix, not required for ByStr
     (size,offset) = rlpReadKind(rawHeader, offset + 445 ); // position of Difficulty
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of Number
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of GasLimit
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of GasUsed
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of Time
     (bytes memory extra,) = rlpGetNextBytes(rawHeader, offset + size);
-    (bytes memory validatorsBytes,) = rlpGetNextBytes(extra, 0x40);
-    (size, offset) = rlpReadKind(validatorsBytes, 0x20);
+    (bytes memory validatorsBytes,) = rlpGetNextBytes(extra, 0x40); // accounting for `bytes` prefix, not required for ByStr
+    (size, offset) = rlpReadKind(validatorsBytes, 0x20); // accounting for `bytes` prefix, not required for ByStr
     require(size%ZION_ADDRESS_LEN==0,"invalid header extra validatorSet");
     validators = new address[](size/ZION_ADDRESS_LEN);
     for (uint i = 0; i*ZION_ADDRESS_LEN<size; i++) {
@@ -512,7 +505,7 @@ let get_validators_from_header : ByStr -> List ByStr20 =
         validators[i] = valAddr;
     }
   *)
-  let p1 = rlp_read_kind rawHeader u0x20 in
+  let p1 = rlp_read_kind rawHeader u0x00 in
   let p2 = let o1 = get_offset p1 in
            let u445 = Uint32 445 in
            let o = builtin add u445 o1 in rlp_read_kind rawHeader o in (* position of Difficulty *)
@@ -521,8 +514,8 @@ let get_validators_from_header : ByStr -> List ByStr20 =
   let p5 = let o = get_data_offset p4 in rlp_read_kind rawHeader o in (* position of GasUsed *)
   let p6 = let o = get_data_offset p5 in rlp_read_kind rawHeader o in (* position of Time *)
   let extra = let o = get_data_offset p6 in let b = rlp_get_next_bytes rawHeader o in get_data b in
-  let val_bz = let b = rlp_get_next_bytes extra u0x40 in get_data b in
-  let p = rlp_read_kind val_bz u0x20 in
+  let val_bz = let b = rlp_get_next_bytes extra u0x20 in get_data b in
+  let p = rlp_read_kind val_bz u0x00 in
   match p with
   | Pair size offset =>
     let check = builtin rem size zion_address_length in
@@ -653,7 +646,7 @@ let verify_header : ByStr32 -> ByStr -> List ByStr20 -> Bool =
   fun (rawSeals : ByStr) =>
   fun (validators : List ByStr20) =>
     (*
-      uint offset = 0x20;
+      uint offset = 0x20;  // accounting for `bytes` prefix, not required for ByStr
       bytes memory seal;
 
       (rawSeals,) = rlpSplit(rawSeals, 0x20);
@@ -669,7 +662,7 @@ let verify_header : ByStr32 -> ByStr -> List ByStr20 -> Bool =
       }
       return hasEnoughSigners(validators, signers);
     *)
-    let p = rlp_split rawSeals u0x20 in
+    let p = rlp_split rawSeals u0x00 in
     let raw_seals_data = get_data p in
     let raw_seals_len = builtin strlen raw_seals_data in
     let seal_count = builtin div raw_seals_len zion_seal_length in
@@ -721,43 +714,44 @@ let next_offset : Uint32 -> ByStr -> Uint32 =
     let len = builtin strlen bz in
     builtin add current_offset len
 
-let encode_tx_param =
-  fun (txHash : ByStr) =>
-  fun (crossChainId : ByStr) =>
-  fun (fromContract : ByStr) =>
-  fun (toChainId : Uint64) =>
-  fun (toContract : ByStr) =>
-  fun (method : ByStr) =>
-  fun (args : ByStr) =>
-    (* tail: data *)
-    let t1 = abi_encode_bytes txHash in
-    let t2 = abi_encode_bytes crossChainId in
-    let t3 = abi_encode_bytes fromContract in
-    let t4 = builtin to_bystr empty_abi_encoded_string in
-    let t5 = abi_encode_bytes toContract in
-    let t6 = abi_encode_bytes method in
-    (* compute offsets *)
-    let o1 = u0xe0 in (* initial offset of 7 x 32 = 224 bytes used for headers *)
-    let o2 = next_offset o1 t1 in
-    let o3 = next_offset o2 t2 in
-    let o4 = next_offset o3 t3 in
-    let o5 = next_offset o4 t4 in
-    let o6 = next_offset o5 t5 in
-    let o7 = next_offset o6 t6 in
-    (* head: offsets *)
-    let h1 = abi_encode_length o1 in
-    let h2 = append_abi_encoded_length h1 o2 in
-    let h3 = append_abi_encoded_length h2 o3 in
-    let h4 = append_abi_encoded_length h3 o4 in (* uint64 is a fixed type *)
-    let h5 = append_abi_encoded_length h4 o5 in
-    let h6 = append_abi_encoded_length h5 o6 in
-    append_abi_encoded_length h6 o7
-    (* TODO: incomplete. may not be needed *)
+let encode_tx_param : TxParam -> ByStr =
+  fun (tx_param : TxParam) =>
+    match tx_param with
+    | TxParam txHash crossChainId fromContract toChainId toContract method args =>
+      (* tail: data *)
+      let t1 = abi_encode_bytes txHash in
+      let t2 = abi_encode_bytes crossChainId in
+      let t3 = abi_encode_bytes fromContract in
+      let t4 = builtin to_bystr empty_abi_encoded_string in
+      let t5 = abi_encode_bytes toContract in
+      let t6 = abi_encode_bytes method in
+      (* compute offsets *)
+      let o1 = u0xe0 in (* initial offset of 7 x 32 = 224 bytes used for headers *)
+      let o2 = next_offset o1 t1 in
+      let o3 = next_offset o2 t2 in
+      let o4 = next_offset o3 t3 in
+      let o5 = next_offset o4 t4 in
+      let o6 = next_offset o5 t5 in
+      (* head: offsets *)
+      let h1 = abi_encode_length o1 in
+      let h2 = append_abi_encoded_length h1 o2 in
+      let h3 = append_abi_encoded_length h2 o3 in
+      let h4 = append_abi_encoded_length h3 o4 in (* uint64 is a fixed type *)
+      let h5 = append_abi_encoded_length h4 o5 in
+      let h6 = append_abi_encoded_length h5 o6 in
+      (* combine head to with tail *)
+      let c1 = builtin concat h6 t1 in
+      let c2 = builtin concat c1 t2 in
+      let c3 = builtin concat c2 t3 in
+      let c4 = builtin concat c3 t4 in
+      let c5 = builtin concat c4 t5 in
+      builtin concat c5 t6
+    end
 
 let decode_tx_param : ByStr -> TxParam =
   fun (rawParam : ByStr) =>
     (*
-      uint offset = 0x20;
+      uint offset = 0x20; // accounting for `bytes` prefix, not required for ByStr
       (param.txHash,offset) = rlpGetNextBytes(rawParam, offset);
       (param.crossChainId,offset) = rlpGetNextBytes(rawParam, offset);
       (param.fromContract,offset) = rlpGetNextBytes(rawParam, offset);
@@ -766,7 +760,7 @@ let decode_tx_param : ByStr -> TxParam =
       (param.method,offset) = rlpGetNextBytes(rawParam, offset);
       (param.args,offset) = rlpGetNextBytes(rawParam, offset);
     *)
-    let p1 = rlp_get_next_bytes rawParam u0x20 in match p1 with
+    let p1 = rlp_get_next_bytes rawParam u0x00 in match p1 with
     | Pair tx_hash o1 =>
     let p2 = rlp_get_next_bytes rawParam o1 in match p2 with
     | Pair cross_chain_id o2 =>
@@ -783,11 +777,10 @@ let decode_tx_param : ByStr -> TxParam =
     TxParam tx_hash cross_chain_id from_contract to_chain_id to_contract method args
     end end end end end end end
 
-
 let decode_cross_tx : ByStr -> CrossTx =
   fun (rawTx : ByStr) =>
     (*
-      uint offset = 0x20;
+      uint offset = 0x20; // account for `bytes` prefix
       (,offset) = rlpReadKind(rawTx, offset);
       bytes memory crossTxParam;
       (crossTx.txHash,offset) = rlpGetNextBytes(rawTx, offset);
@@ -795,7 +788,7 @@ let decode_cross_tx : ByStr -> CrossTx =
       (crossTxParam,offset) = rlpGetNextBytes(rawTx, offset);
       crossTx.crossTxParam = decodeTxParam(crossTxParam);
     *)
-    let p1 = rlp_read_kind rawTx u0x20 in
+    let p1 = rlp_read_kind rawTx u0x00 in
     let o1 = get_offset p1 in
     let p2 = rlp_get_next_bytes rawTx o1 in match p2 with
     | Pair tx_hash o2 =>
@@ -807,104 +800,127 @@ let decode_cross_tx : ByStr -> CrossTx =
     CrossTx tx_hash from_chain_id tx_param
     end end end
 
-(*
-    /*
-    Account Proof
-     -key : keccak256(address[:])
-     -val : rlp(state-obj)
-     -root : header.Root
+let verify_proof : ByStr -> ByStr -> ByStr -> ByStr =
+  fun (proof : ByStr) =>
+  fun (key : ByStr) =>
+  fun (root : ByStr) =>
+    padding (* TODO *)
+  (*
 
-    Storage Proof
-     -key : keccak256(slot-index) // 32bytes index
-     -val : 32 bytes data
-     -root : Account.storageHash
+      // no copy , parse proof in-place , so if _proof is needed after , back up it.
+      // for proof like: rlp([rlp(node1),rlp(node2),...,rlp(nodeN)])
+      function verifyProof(bytes memory _proof, bytes memory _key, bytes memory _root) internal pure returns(bytes memory value) {
+          _key = bytesToHex(_key);
+          (_proof,) = rlpSplit(_proof,0x20); // get *[rlp(node1),rlp(node2),...,rlp(nodeN)]*
+          uint offset = 0x20;
+          uint size = _proof.length;
+          value = _root; // *value* = *_root* ( which equal *hash(rlp(node1))* )
 
-    rlp(state-obj) == rlp(Account)
-     type Account struct {
-	  Nonce    uint64
-	  Balance  *big.Int
-	  Root     bytes32   // also : storageHash
-	  CodeHash []byte
-    }
-    */
-    function verifyAccountProof(
-        bytes memory _accountProof,
-        bytes memory _headerRoot,
-        bytes memory _address,
-        bytes memory _storageProof,
-        bytes memory _storageIndex
-    ) internal pure returns(bytes memory value) {
-         // verify account proof
-        bytes memory _accountKey = _address;
-        assembly {
-            mstore(add(_accountKey,0x20), keccak256(add(_accountKey, 0x20), mload(_accountKey)))
-            mstore(_accountKey, 0x20)
+          for (;offset<size+0x20;) {
+              bytes memory node; // memory for *nodeI*
+              require(checkNodeHash(_proof,offset,value),"proof:unequal node hash"); // compare *nodeI-1.value* and *hash(rlp(nodeI))*
+              (node,offset) = rlpSplit(_proof,offset); // get *nodeI*; _proof now: *[rlp(nodeI+1),rlp(nodeI+2),...,rlp(nodeN)]*
+
+              (uint size_tmp,uint offset_tmp) = rlpReadKind(node,0x20);
+              (size_tmp,offset_tmp) = rlpReadKind(node,offset_tmp+size_tmp);
+              offset_tmp += size_tmp; // length of first two node elements
+              if (offset_tmp==node.length+0x20) { // shortNode = [rlp(key),rlp(value)]
+                  (bytes memory keyElement,uint _offset) = rlpSplit(node,0x20);
+                  bool isIn;
+                  bytes memory subKey = compactToHex(keyElement);
+                  (_key,isIn) = compareKey(_key, subKey);
+                  require(isIn,"proof:invalid key");
+                  (value,) = rlpSplit(node,_offset);
+              } else { // fullNode = [hash(child[0]),hash(child[1]),...,hash(child[15]),emptyKeyValue]
+                  uint index;
+                  if (_key.length==0) {
+                      index = 17;
+                  } else {
+                      (_key,index) = takeOneByte(_key);
+                  }
+                  uint _offset = 0x20;
+                  for (uint i=0;i<17;i++) {
+                      if (index==i) {
+                          (value,) = rlpSplit(node,_offset);
+                          break;
+                      } else {
+                          (size_tmp,offset_tmp) = rlpReadKind(node,_offset);
+                          _offset = offset_tmp + size_tmp;
+                      }
+                  }
+              }
+          }
+
+          require(_key.length==0,"proof:invalid key");
+      }
+  *)
+
+let verify_account_proof : ByStr -> ByStr -> ByStr -> ByStr -> ByStr -> ByStr =
+  fun (accountProof : ByStr) =>
+  fun (headerRoot : ByStr) =>
+  fun (address : ByStr) =>
+  fun (storageProof : ByStr) =>
+  fun (storageIndex : ByStr) =>
+    (*
+        /*
+        Account Proof
+        -key : keccak256(address[:])
+        -val : rlp(state-obj)
+        -root : header.Root
+
+        Storage Proof
+        -key : keccak256(slot-index) // 32bytes index
+        -val : 32 bytes data
+        -root : Account.storageHash
+
+        rlp(state-obj) == rlp(Account)
+        type Account struct {
+          Nonce    uint64
+          Balance  *big.Int
+          Root     bytes32   // also : storageHash
+          CodeHash []byte
         }
-        bytes memory account = verifyProof(_accountProof, _accountKey, _headerRoot);
-
-        // decode state object
-        (account,) = rlpSplit(account,0x20);
-        (,uint offset) = rlpSplit(account,0x20); // nonce
-        (,offset) = rlpSplit(account,offset);    // balance
-        (bytes memory storageRoot,) = rlpSplit(account,offset);
-
-        // verify storage proof
-        bytes memory _storageKey = _storageIndex;
-        assembly {
-            mstore(add(_storageKey,0x20), keccak256(add(_storageKey, 0x20), mload(_storageKey)))
-            mstore(_storageKey, 0x20)
-        }
-        value = verifyProof(_storageProof, _storageKey, storageRoot);
-        (value,) = rlpSplit(value, 0x20);
-    }
-
-    // no copy , parse proof in-place , so if _proof is needed after , back up it.
-    // for proof like: rlp([rlp(node1),rlp(node2),...,rlp(nodeN)])
-    function verifyProof(bytes memory _proof, bytes memory _key, bytes memory _root) internal pure returns(bytes memory value) {
-        _key = bytesToHex(_key);
-        (_proof,) = rlpSplit(_proof,0x20); // get *[rlp(node1),rlp(node2),...,rlp(nodeN)]*
-        uint offset = 0x20;
-        uint size = _proof.length;
-        value = _root; // *value* = *_root* ( which equal *hash(rlp(node1))* )
-
-        for (;offset<size+0x20;) {
-            bytes memory node; // memory for *nodeI*
-            require(checkNodeHash(_proof,offset,value),"proof:unequal node hash"); // compare *nodeI-1.value* and *hash(rlp(nodeI))*
-            (node,offset) = rlpSplit(_proof,offset); // get *nodeI*; _proof now: *[rlp(nodeI+1),rlp(nodeI+2),...,rlp(nodeN)]*
-
-            (uint size_tmp,uint offset_tmp) = rlpReadKind(node,0x20);
-            (size_tmp,offset_tmp) = rlpReadKind(node,offset_tmp+size_tmp);
-            offset_tmp += size_tmp; // length of first two node elements
-            if (offset_tmp==node.length+0x20) { // shortNode = [rlp(key),rlp(value)]
-                (bytes memory keyElement,uint _offset) = rlpSplit(node,0x20);
-                bool isIn;
-                bytes memory subKey = compactToHex(keyElement);
-                (_key,isIn) = compareKey(_key, subKey);
-                require(isIn,"proof:invalid key");
-                (value,) = rlpSplit(node,_offset);
-            } else { // fullNode = [hash(child[0]),hash(child[1]),...,hash(child[15]),emptyKeyValue]
-                uint index;
-                if (_key.length==0) {
-                    index = 17;
-                } else {
-                    (_key,index) = takeOneByte(_key);
-                }
-                uint _offset = 0x20;
-                for (uint i=0;i<17;i++) {
-                    if (index==i) {
-                        (value,) = rlpSplit(node,_offset);
-                        break;
-                    } else {
-                        (size_tmp,offset_tmp) = rlpReadKind(node,_offset);
-                        _offset = offset_tmp + size_tmp;
-                    }
-                }
+        */
+            bytes memory _accountKey = _address;
+            assembly {
+                mstore(add(_accountKey,0x20), keccak256(add(_accountKey, 0x20), mload(_accountKey)))
+                mstore(_accountKey, 0x20)
             }
-        }
+            bytes memory account = verifyProof(_accountProof, _accountKey, _headerRoot);
 
-        require(_key.length==0,"proof:invalid key");
-    }
-*)
+            // decode state object
+            (account,) = rlpSplit(account,0x20);
+            (,uint offset) = rlpSplit(account,0x20); // nonce
+            (,offset) = rlpSplit(account,offset);    // balance
+            (bytes memory storageRoot,) = rlpSplit(account,offset);
+
+            // verify storage proof
+            bytes memory _storageKey = _storageIndex;
+            assembly {
+                mstore(add(_storageKey,0x20), keccak256(add(_storageKey, 0x20), mload(_storageKey)))
+                mstore(_storageKey, 0x20)
+            }
+            value = verifyProof(_storageProof, _storageKey, storageRoot);
+            (value,) = rlpSplit(value, 0x20);
+        }
+    *)
+    let account_hash = builtin keccak256hash address in
+    let account_key = builtin to_bystr account_hash in
+    let account = verify_proof accountProof account_key headerRoot in
+    let get_offset_ = @snd ByStr Uint32 in
+    let p1 = rlp_split account u0x00 in
+    let d1 = get_data p1 in
+    let p2 = rlp_split d1 u0x00 in (* nonce *)
+    let o2 = get_offset_ p2 in
+    let p3 = rlp_split d1 o2 in (* balance *)
+    let o3 = get_offset_ p3 in
+    let p4 = rlp_split d1 o3 in
+    let storageRoot = get_data p4 in
+    let storage_hash = builtin keccak256hash storageIndex in
+    let storage_key = builtin to_bystr storage_hash in
+    let value = verify_proof storageProof storage_key storageRoot in
+    let r = rlp_split value u0x20 in
+    get_data r
 
 (***************************************************)
 (*             The contract definition             *)
@@ -1108,7 +1124,8 @@ transition CrossChain(
   cross_chain_id = let hash = builtin keccak256hash id_bz in builtin to_bystr hash;
   sender = builtin to_bystr _sender;
   params = TxParam idx_bz cross_chain_id sender toChainId toContract method txData;
-  tx_hash = builtin keccak256hash params;
+  params_bz = encode_tx_param params;
+  tx_hash = builtin keccak256hash params_bz;
 
   msg_to_eccd =  {
     _tag : "PutTxHash"; _recipient: eccd; _amount: zero_amt;
