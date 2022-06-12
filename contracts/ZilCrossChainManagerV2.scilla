@@ -347,14 +347,10 @@ let rlp_get_next_bytes : ByStr -> Uint32 -> Pair ByStr Uint32 =
             // so all this basically just puts [...size, sizebytes] into res
         }
       *)
-      let size_u256 = grow size in
-      let size_bz_fixed = builtin to_bystr32 size_u256 in (* size occupies 1 word *)
-      let size_bz = builtin to_bystr size_bz_fixed in
       let data_bz = builtin substr raw data_offset size in
       let required_size = let x = builtin add size u0x1f in let y = builtin div x u0x20 in let z = builtin add y u0x01 in builtin mul z u0x20 in
       let data_bz_padded = pad data_bz required_size in
-      let bz = builtin concat size_bz data_bz_padded in
-      Pair {ByStr Uint32} bz new_offset
+      Pair {ByStr Uint32} data_bz_padded new_offset (* ignore the size prefix for `bytes` *)
     end
 
 let rlp_get_next_uint256 : ByStr -> Uint32 -> Pair Uint256 Uint32 =
@@ -467,7 +463,7 @@ let decode_header : ByStr -> Header =
     (size,offset) = rlpReadKind(rawHeader, offset + 445); // position of Difficulty
     (header.number,) = rlpGetNextUint256(rawHeader, offset + size);  // position of Number
   *)
-    let p1 = rlp_read_kind rawHeader u0x20 in
+    let p1 = rlp_read_kind rawHeader u0x00 in (* ignore `bytes` prefix *)
     let offset = get_offset p1 in
     let o2 = let x = Uint32 87 in builtin add offset x in
     let p2 = rlp_get_next_bytes rawHeader o2 in
@@ -505,7 +501,7 @@ let get_validators_from_header : ByStr -> List ByStr20 =
         validators[i] = valAddr;
     }
   *)
-  let p1 = rlp_read_kind rawHeader u0x00 in
+  let p1 = rlp_read_kind rawHeader u0x00 in (* ignore `bytes` prefix *)
   let p2 = let o1 = get_offset p1 in
            let u445 = Uint32 445 in
            let o = builtin add u445 o1 in rlp_read_kind rawHeader o in (* position of Difficulty *)
@@ -514,7 +510,7 @@ let get_validators_from_header : ByStr -> List ByStr20 =
   let p5 = let o = get_data_offset p4 in rlp_read_kind rawHeader o in (* position of GasUsed *)
   let p6 = let o = get_data_offset p5 in rlp_read_kind rawHeader o in (* position of Time *)
   let extra = let o = get_data_offset p6 in let b = rlp_get_next_bytes rawHeader o in get_data b in
-  let val_bz = let b = rlp_get_next_bytes extra u0x20 in get_data b in
+  let val_bz = let b = rlp_get_next_bytes extra u0x00 in get_data b in (* ignore `bytes` prefix *)
   let p = rlp_read_kind val_bz u0x00 in
   match p with
   | Pair size offset =>
@@ -662,13 +658,13 @@ let verify_header : ByStr32 -> ByStr -> List ByStr20 -> Bool =
       }
       return hasEnoughSigners(validators, signers);
     *)
-    let p = rlp_split rawSeals u0x00 in
+    let p = rlp_split rawSeals u0x00 in (* ignore `bytes` prefix *)
     let raw_seals_data = get_data p in
     let raw_seals_len = builtin strlen raw_seals_data in
     let seal_count = builtin div raw_seals_len zion_seal_length in
     let count = builtin to_nat seal_count in
     let signers = Nil {ByStr20} in
-    let acc = Pair {(List ByStr20) Uint32} signers u0x00 in
+    let acc = Pair {(List ByStr20) Uint32} signers u0x00 in (* ignore `bytes` prefix; initial offset is 0 instead of 32 *)
     let fold = @nat_fold (Pair (List ByStr20) Uint32) in
     let fn = fun (cur : Pair (List ByStr20) Uint32) => fun (num : Nat) =>
       match cur with
@@ -760,7 +756,7 @@ let decode_tx_param : ByStr -> TxParam =
       (param.method,offset) = rlpGetNextBytes(rawParam, offset);
       (param.args,offset) = rlpGetNextBytes(rawParam, offset);
     *)
-    let p1 = rlp_get_next_bytes rawParam u0x00 in match p1 with
+    let p1 = rlp_get_next_bytes rawParam u0x00 in match p1 with (* ignore `bytes` prefix *)
     | Pair tx_hash o1 =>
     let p2 = rlp_get_next_bytes rawParam o1 in match p2 with
     | Pair cross_chain_id o2 =>
@@ -919,7 +915,7 @@ let verify_account_proof : ByStr -> ByStr -> ByStr -> ByStr -> ByStr -> ByStr =
     let storage_hash = builtin keccak256hash storageIndex in
     let storage_key = builtin to_bystr storage_hash in
     let value = verify_proof storageProof storage_key storageRoot in
-    let r = rlp_split value u0x20 in
+    let r = rlp_split value u0x00 in (* ignore `bytes` prefix *)
     get_data r
 
 (***************************************************)
