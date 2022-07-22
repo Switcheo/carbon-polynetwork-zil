@@ -1,0 +1,408 @@
+scilla_version 0
+
+(***************************************************)
+(*               Associated library                *)
+(***************************************************)
+import Polynetwork IntUtils Conversions
+
+library BridgeEntrance
+
+let uint256_one = Uint256 1
+let uint128_zero = Uint128 0
+let uint32_zero = Uint32 0
+let uint32_20 = Uint32 20
+let zero_address = 0x0000000000000000000000000000000000000000
+let zero_bystr = let a = 0x in builtin to_bystr a
+let true = True
+let false = False
+
+(* it is unlock *)
+let unlock = let a = 0x756e6c6f636b in builtin to_bystr a
+
+(* used for cross-chain lock and unlock methods *)
+(* fromAssetHash toAssetHash toAddress fromAddress amount feeAmount feeAddress nonce *)
+type TransferTxArgs =
+| TransferTxArgs of ByStr ByStr ByStr ByStr Uint256 Uint256 ByStr Uint256
+
+type Error = 
+  | AmountCannotBeZero
+  | AssetNotRegistered
+  | ContractPaused
+  | ContractNotPaused
+  | EmptyHashStr
+  | IllegalAmount
+  | IllegalRegisterAssetArgs
+  | InvalidFeeAmount
+  | InvalidAddress
+  | InvalidLockProxyContract
+  | NotAdmin
+
+let make_error =
+  fun (result: Error) =>
+    let result_code =
+      match result with
+      | AmountCannotBeZero                => Int32 -1
+      | AssetNotRegistered                => Int32 -2
+      | ContractPaused                    => Int32 -3
+      | ContractNotPaused                 => Int32 -4
+      | EmptyHashStr                      => Int32 -5
+      | IllegalAmount                     => Int32 -6
+      | IllegalRegisterAssetArgs          => Int32 -7
+      | InvalidFeeAmount                  => Int32 -8
+      | InvalidAddress                    => Int32 -9
+      | InvalidLockProxyContract          => Int32 -10
+      | NotAdmin                          => Int32 -11
+      end
+    in
+    { _exception: "Error"; code: result_code }
+
+
+let one_msg =
+  fun (m : Message) =>
+    let e = Nil {Message} in
+      Cons {Message} m e
+
+let serialize_proxy_addr_to_asset_hash = 
+  fun (proxy_addr: ByStr) =>
+  fun (to_asset_hash: ByStr) =>
+    let empty_str_0x = 0x in
+    let empty_str = builtin to_bystr empty_str_0x in
+    let proxy_addr_str = append_varbytes empty_str proxy_addr in
+    let to_asset_hash_str = append_varbytes proxy_addr_str to_asset_hash in
+      to_asset_hash_str
+
+let serialize_transfer_tx_args = 
+  fun (args: TransferTxArgs) =>
+    match args with
+    | TransferTxArgs fromAssetHash toAssetHash toAddress fromAddress amount feeAmount feeAddress nonce =>
+      let empty_str_0x = 0x in
+      let empty_str = builtin to_bystr empty_str_0x in
+      let from_asset_hash_str = append_varbytes empty_str fromAssetHash in
+      let to_asset_hash_str = append_varbytes from_asset_hash_str toAssetHash in
+      let to_address_str = append_varbytes to_asset_hash_str toAddress in
+      let amount_str = append_uint256_le to_address_str amount in
+      let fee_amount_str = append_uint256_le amount_str feeAmount in
+      let fee_address_str = append_varbytes fee_amount_str feeAddress in
+      let from_address_str = append_varbytes fee_address_str fromAddress in
+      let nonce_str = append_uint256_le from_address_str nonce in
+        nonce_str
+    end
+
+(***************************************************)
+(*             The contract definition             *)
+(***************************************************)
+contract BridgeEntrance(
+  init_admin: ByStr20,
+  init_lock_proxy: ByStr20
+)
+
+field admin: ByStr20 = init_admin
+field lock_proxy: ByStr20 = init_lock_proxy
+field nonce: Uint256 = Uint256 0
+field paused: Bool = false
+
+(* Procedures *)
+procedure ThrowError(err: Error)
+  e = make_error err;
+  throw e
+end
+
+procedure IsAdmin()
+  contract_admin <- admin;
+  equal = builtin eq _sender contract_admin;
+  match equal with
+  | True =>
+  | False =>
+    e = NotAdmin;
+    ThrowError e
+  end  
+end
+
+procedure IsNotPaused()
+  paused_tmp <- paused;
+  match paused_tmp with
+  | False =>
+  | True  =>
+    e = ContractPaused;
+    ThrowError e
+  end
+end
+
+(* Calls the CrossChain transition on the CCM to initiate the unlocking of the funds on the other chain *)
+procedure CrossChain(
+  toChainId: Uint64,
+  toContract: ByStr,
+  method: ByStr,
+  txData: ByStr,
+  l_proxy: ByStr20 with contract 
+    field manager_proxy: ByStr20,
+    field counterpart_chainId: Uint64,
+    field register: Map ByStr20 ByStr32
+  end
+)
+  manager_proxy_l <- & l_proxy.manager_proxy;
+  msg = {_tag: "CrossChain"; _recipient: manager_proxy_l; _amount: uint128_zero; 
+        toChainId: toChainId; toContract: toContract; method: method; txData: txData };
+  msgs = one_msg msg;
+  send msgs
+end
+
+procedure IncreaseNonce()
+ old_nonce <- nonce;
+ new_nonce = builtin add old_nonce uint256_one;
+ nonce := new_nonce
+end
+
+procedure ValidateAddrLength(proxyAddr: ByStr)
+  length = builtin strlen proxyAddr;
+  is_addr = builtin eq length uint32_20;
+  match is_addr with
+  | True =>
+  | False =>
+    e = IllegalRegisterAssetArgs;
+    ThrowError e
+  end
+end
+
+(* lock amount should not be zero *)
+procedure ValidateAmount(amount: Uint128)
+  is_zero = builtin eq amount uint128_zero;
+  match is_zero with
+  | True =>
+    e =  AmountCannotBeZero;
+    ThrowError e
+  | False =>
+  end
+end
+
+(* fee amount must be less that amount *)
+procedure ValidateFeeAmount(feeAmount: Uint128, amount: Uint128)
+  less = builtin lt feeAmount amount;
+  match less with
+  | True =>
+  | False =>
+    e = InvalidFeeAmount;
+    ThrowError e
+  end
+end
+
+(* can be used both for validating targetProxyHash and toAddress and fromAssetHash *)
+procedure ValidateHashLength(hash: ByStr)
+  hash_length = builtin strlen hash;
+  zero_length = builtin eq hash_length uint32_zero;
+  match zero_length with
+  | True =>
+    e = EmptyHashStr;
+    ThrowError e
+  | False =>
+  end
+end
+
+(* Reads the register of the LockProxy contract *)
+(* Validates that an asset registration matches the given params *)
+(* @param tokenAddr: the address of the asset to check *)
+(* @param proxyAddr: the expected proxy address on Swticheo TradeHub *)
+(* @param toAssetHash: the expected asset hash on Swticheo TradeHub *)
+procedure ValidateAssetRegistration(tokenAddr: ByStr20, proxyAddr: ByStr, toAssetHash: ByStr, l_proxy: ByStr20 with contract 
+  field manager_proxy: ByStr20,
+  field counterpart_chainId: Uint64,
+  field register: Map ByStr20 ByStr32
+  end)
+
+  ValidateAddrLength proxyAddr;
+  x = serialize_proxy_addr_to_asset_hash proxyAddr toAssetHash;
+  value = builtin keccak256hash x;
+  value_stored_o <- & l_proxy.register[tokenAddr];
+  match value_stored_o with
+  | Some value_stored =>
+    registered = builtin eq value_stored value;
+    match registered with
+    | True =>
+    | False =>
+      e = AssetNotRegistered;
+      ThrowError e
+    end
+  | None => 
+    e = AssetNotRegistered;
+    ThrowError e
+  end
+end
+
+(* @param fromAssetHash: The asset address in current chain, uniformly named as fromAssetHash *)
+(* @param fromAddress: obtained by _sender *)
+(* @param toAddress: LockProxy address *)
+(* @param amount: The amount of ZRC2 tokens to be transferred to the lockProxy  *)
+procedure TransferZRC2ToLockProxy(fromAssetHash: ByStr20, fromAddress: ByStr20, toAddress: ByStr20, amount: Uint128)
+  msg_to_zrc2 = {_tag: "TransferFrom"; _recipient: fromAssetHash; _amount: uint128_zero; 
+                  from: fromAddress; to: toAddress; amount: amount};
+  msgs = one_msg msg_to_zrc2;
+  send msgs
+end
+
+procedure TransferNativeZILToLockProxy(toAddress: ByStr20, amount: Uint128)
+  msg = {_tag: "AddFunds"; _recipient: toAddress; _amount: amount };
+  msgs = one_msg msg;
+  send msgs
+end
+
+(* transfer asset from fromAddress to LockProxy contract *)
+(* @param assetHash: The asset address in current chain, uniformly named as assetHash *)
+(* @param toAddress: The address that the asset is sent to. In this case, the LockProxy address *)
+procedure TransferToLockProxy(assetHash: ByStr20, toAddress: ByStr, amount: Uint128)
+  (* Need to convert ByStr to ByStr20 *)
+  to_address = builtin to_bystr20 toAddress;
+  match to_address with
+  | Some address =>
+    (* if people choose to lock native zil, then assetHash should be 0x0000000000000000000000000000000000000000 *)
+    is_asset_zil = builtin eq assetHash zero_address;
+    match is_asset_zil with
+    | True =>
+      (* Send message to the lockProxy contract to accept the ZIL *)
+      TransferNativeZILToLockProxy address amount;
+      e = {
+        _eventname: "TransferNativeZILToLockProxy";
+        fromAddress: _sender;
+        toAddress: toAddress;
+        assetHash: assetHash;
+        amount: amount
+      };
+      event e
+    | False =>
+      (* Send message to lockProxy Contract to accept ZRC2 tokens *)
+      TransferZRC2ToLockProxy assetHash _sender address amount;
+      e = {
+        _eventname: "TransferZRC2ToLockProxy";
+        fromAddress: _sender;
+        toAddress: toAddress;
+        assetHash: assetHash;
+        amount: amount
+      };
+      event e
+    end
+  | None => 
+    e = InvalidAddress;
+    ThrowError e
+  end
+end
+
+(* Validates the asset registration and calls the CCM contract *)
+procedure LockProcedure(
+  tokenAddr: ByStr20,
+  targetProxyHash: ByStr,
+  toAssetHash: ByStr,
+  fromAddr: ByStr20,
+  toAddress: ByStr,
+  amount: Uint256,
+  feeAmount: Uint256,
+  feeAddr: ByStr,
+  l_proxy: ByStr20 with contract 
+    field manager_proxy: ByStr20,
+    field counterpart_chainId: Uint64,
+    field register: Map ByStr20 ByStr32
+  end
+)
+  ValidateAddrLength targetProxyHash;
+  ValidateHashLength toAssetHash;
+  ValidateHashLength toAddress;
+  amount_uint128_o = builtin to_uint128 amount;
+  match amount_uint128_o with
+  | Some amount_uint128 =>
+    ValidateAmount amount_uint128;
+    fee_amount_uint128_o = builtin to_uint128 feeAmount;
+    match fee_amount_uint128_o with
+    | Some fee_amount_uint128 =>
+
+      ValidateFeeAmount fee_amount_uint128 amount_uint128;
+      ValidateAssetRegistration tokenAddr targetProxyHash toAssetHash l_proxy;
+      fromAssetHash = builtin to_bystr tokenAddr;
+      fromAddress = builtin to_bystr fromAddr;
+      IncreaseNonce;
+      n <- nonce;
+
+      transfer_tx_args = TransferTxArgs fromAssetHash toAssetHash toAddress fromAddress amount feeAmount feeAddr n;
+      tx_data = serialize_transfer_tx_args transfer_tx_args;
+
+      counterpartChainId <- & l_proxy.counterpart_chainId;
+      CrossChain counterpartChainId targetProxyHash unlock tx_data l_proxy;
+
+      e = { _eventname: "Lock"; fromAssetHash: fromAssetHash; fromAddress: fromAddress; toChainId: counterpartChainId; 
+          toAssetHash: toAssetHash; toAddress: toAddress; amount: amount; feeAmount: feeAmount; tx_data: tx_data};
+      event e
+    | None =>
+      e = InvalidFeeAmount;
+      ThrowError e
+    end
+  | None =>
+    e = IllegalAmount;
+    ThrowError e
+  end
+end
+
+(***************************************************)
+(*                  Transition                     *)
+(***************************************************)
+
+(* Perform a deposit to the LockProxy contract *)
+(* @param tokenAddr: the address of the token to deposit *)
+(* @param targetProxyHash: the associated proxy hash on Switcheo TradeHub *)
+(* @param toAddress: the hex version of the Switcheo TradeHub address to deposit to *)
+(* @param toAssetHash: the associated asset hash on Swticheo TradeHub *)
+(* @param feeAddr: the hex version of the Switcheo TradeHub address to send the fee to *)
+(* @param amount: the number of tokens to deposit *)
+(* @param feeAmount: the number of tokens to be used as fees *)
+transition Lock(
+  tokenAddr: ByStr20,
+  targetProxyHash: ByStr, 
+  toAddress: ByStr,
+  toAssetHash: ByStr,
+  feeAddr: ByStr,
+  amount: Uint256,
+  feeAmount: Uint256
+)
+  IsNotPaused;
+  amount_uint128_o = builtin to_uint128 amount;
+  match amount_uint128_o with
+  | Some amount_uint128 =>
+    proxy <- lock_proxy;
+    maybe_lock_proxy <- & proxy as ByStr20 with contract 
+      field manager_proxy: ByStr20,
+      field counterpart_chainId: Uint64,
+      field register: Map ByStr20 ByStr32
+      end;
+    match maybe_lock_proxy with
+    | Some l_proxy =>
+      TransferToLockProxy tokenAddr toAddress amount_uint128;
+      LockProcedure tokenAddr targetProxyHash toAssetHash _sender toAddress amount feeAmount feeAddr l_proxy
+    | None =>
+      e = InvalidLockProxyContract;
+      ThrowError e
+    end
+  | None =>
+    e = IllegalAmount;
+    ThrowError e
+  end
+end
+
+(***************************************************)
+(*            House keeping transition             *)
+(***************************************************)
+
+transition Pause()
+  IsAdmin;
+  paused:= true
+end
+
+transition Unpause()
+  IsAdmin;
+  paused:= false
+end
+
+transition UpdateAdmin(newAdmin: ByStr20)
+  IsAdmin;
+  admin:= newAdmin
+end
+
+transition UpdateLockProxy(new_lock_proxy: ByStr20)
+  IsAdmin;
+  lock_proxy:= new_lock_proxy
+end
