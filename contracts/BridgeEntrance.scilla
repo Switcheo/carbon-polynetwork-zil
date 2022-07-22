@@ -20,9 +20,9 @@ let false = False
 let unlock = let a = 0x756e6c6f636b in builtin to_bystr a
 
 (* used for cross-chain lock and unlock methods *)
-(* fromAssetHash toAssetHash toAddress fromAddress amount feeAmount feeAddress nonce *)
+(* fromAssetAddress fromAssetDenom toAssetDenom recoveryAddress toAddress amount withdrawFeeAmount withdrawFeeAddress *)
 type TransferTxArgs =
-| TransferTxArgs of ByStr ByStr ByStr ByStr Uint256 Uint256 ByStr Uint256
+| TransferTxArgs of ByStr ByStr ByStr ByStr ByStr Uint256 Uint256 ByStr
 
 type Error = 
   | AmountCannotBeZero
@@ -64,28 +64,28 @@ let one_msg =
 
 let serialize_proxy_addr_to_asset_hash = 
   fun (proxy_addr: ByStr) =>
-  fun (to_asset_hash: ByStr) =>
+  fun (from_asset_denom: ByStr) =>
     let empty_str_0x = 0x in
     let empty_str = builtin to_bystr empty_str_0x in
     let proxy_addr_str = append_varbytes empty_str proxy_addr in
-    let to_asset_hash_str = append_varbytes proxy_addr_str to_asset_hash in
+    let to_asset_hash_str = append_varbytes proxy_addr_str from_asset_denom in
       to_asset_hash_str
 
 let serialize_transfer_tx_args = 
   fun (args: TransferTxArgs) =>
     match args with
-    | TransferTxArgs fromAssetHash toAssetHash toAddress fromAddress amount feeAmount feeAddress nonce =>
+    | TransferTxArgs fromAssetAddress fromAssetDenom toAssetDenom recoveryAddress toAddress amount withdrawFeeAmount withdrawFeeAddress =>
       let empty_str_0x = 0x in
       let empty_str = builtin to_bystr empty_str_0x in
-      let from_asset_hash_str = append_varbytes empty_str fromAssetHash in
-      let to_asset_hash_str = append_varbytes from_asset_hash_str toAssetHash in
-      let to_address_str = append_varbytes to_asset_hash_str toAddress in
+      let from_asset_hash_str = append_varbytes empty_str fromAssetAddress in
+      let from_asset_denom_str = append_varbytes empty_str fromAssetDenom in
+      let to_asset_denom_str = append_varbytes empty_str toAssetDenom in
+      let to_recovery_address_str = append_varbytes empty_str recoveryAddress in
+      let to_address_str = append_varbytes to_recovery_address_str toAddress in
       let amount_str = append_uint256_le to_address_str amount in
-      let fee_amount_str = append_uint256_le amount_str feeAmount in
-      let fee_address_str = append_varbytes fee_amount_str feeAddress in
-      let from_address_str = append_varbytes fee_address_str fromAddress in
-      let nonce_str = append_uint256_le from_address_str nonce in
-        nonce_str
+      let withdraw_fee_amount_str = append_uint256_le amount_str withdrawFeeAmount in
+      let withdraw_fee_address_str = append_varbytes withdraw_fee_amount_str withdrawFeeAddress in
+        withdraw_fee_address_str
     end
 
 (***************************************************)
@@ -186,7 +186,6 @@ procedure ValidateFeeAmount(feeAmount: Uint128, amount: Uint128)
   end
 end
 
-(* can be used both for validating targetProxyHash and toAddress and fromAssetHash *)
 procedure ValidateHashLength(hash: ByStr)
   hash_length = builtin strlen hash;
   zero_length = builtin eq hash_length uint32_zero;
@@ -202,15 +201,15 @@ end
 (* Validates that an asset registration matches the given params *)
 (* @param tokenAddr: the address of the asset to check *)
 (* @param proxyAddr: the expected proxy address on Swticheo TradeHub *)
-(* @param toAssetHash: the expected asset hash on Swticheo TradeHub *)
-procedure ValidateAssetRegistration(tokenAddr: ByStr20, proxyAddr: ByStr, toAssetHash: ByStr, l_proxy: ByStr20 with contract 
+(* @param fromAssetDenom: denom of the asset deposited *)
+procedure ValidateAssetRegistration(tokenAddr: ByStr20, proxyAddr: ByStr, fromAssetDenom: ByStr, l_proxy: ByStr20 with contract 
   field manager_proxy: ByStr20,
   field counterpart_chainId: Uint64,
   field register: Map ByStr20 ByStr32
   end)
 
   ValidateAddrLength proxyAddr;
-  x = serialize_proxy_addr_to_asset_hash proxyAddr toAssetHash;
+  x = serialize_proxy_addr_to_asset_hash proxyAddr fromAssetDenom;
   value = builtin keccak256hash x;
   value_stored_o <- & l_proxy.register[tokenAddr];
   match value_stored_o with
@@ -228,12 +227,12 @@ procedure ValidateAssetRegistration(tokenAddr: ByStr20, proxyAddr: ByStr, toAsse
   end
 end
 
-(* @param fromAssetHash: The asset address in current chain, uniformly named as fromAssetHash *)
+(* @param tokenAddr: The asset address in current chain, uniformly named as tokenAddr *)
 (* @param fromAddress: obtained by _sender *)
 (* @param toAddress: LockProxy address *)
 (* @param amount: The amount of ZRC2 tokens to be transferred to the lockProxy  *)
-procedure TransferZRC2ToLockProxy(fromAssetHash: ByStr20, fromAddress: ByStr20, toAddress: ByStr20, amount: Uint128)
-  msg_to_zrc2 = {_tag: "TransferFrom"; _recipient: fromAssetHash; _amount: uint128_zero; 
+procedure TransferZRC2ToLockProxy(tokenAddr: ByStr20, fromAddress: ByStr20, toAddress: ByStr20, amount: Uint128)
+  msg_to_zrc2 = {_tag: "TransferFrom"; _recipient: tokenAddr; _amount: uint128_zero; 
                   from: fromAddress; to: toAddress; amount: amount};
   msgs = one_msg msg_to_zrc2;
   send msgs
@@ -245,36 +244,35 @@ procedure TransferNativeZILToLockProxy(toAddress: ByStr20, amount: Uint128)
   send msgs
 end
 
-(* transfer asset from fromAddress to LockProxy contract *)
-(* @param assetHash: The asset address in current chain, uniformly named as assetHash *)
+(* transfer asset from _sender to LockProxy contract *)
+(* @param tokenAddr: the address of the token to deposit *)
 (* @param toAddress: The address that the asset is sent to. In this case, the LockProxy address *)
-procedure TransferToLockProxy(assetHash: ByStr20, toAddress: ByStr, amount: Uint128)
-  (* Need to convert ByStr to ByStr20 *)
+procedure TransferToLockProxy(tokenAddr: ByStr20, toAddress: ByStr, amount: Uint128)
   to_address = builtin to_bystr20 toAddress;
   match to_address with
   | Some address =>
-    (* if people choose to lock native zil, then assetHash should be 0x0000000000000000000000000000000000000000 *)
-    is_asset_zil = builtin eq assetHash zero_address;
+    (* if people choose to lock native zil, then tokenAddr should be 0x0000000000000000000000000000000000000000 *)
+    is_asset_zil = builtin eq tokenAddr zero_address;
     match is_asset_zil with
     | True =>
-      (* Send message to the lockProxy contract to accept the ZIL *)
+      (* Send message to the LockProxy contract to accept the ZIL *)
       TransferNativeZILToLockProxy address amount;
       e = {
         _eventname: "TransferNativeZILToLockProxy";
         fromAddress: _sender;
         toAddress: toAddress;
-        assetHash: assetHash;
+        tokenAddr: tokenAddr;
         amount: amount
       };
       event e
     | False =>
-      (* Send message to lockProxy Contract to accept ZRC2 tokens *)
-      TransferZRC2ToLockProxy assetHash _sender address amount;
+      (* Send message to LockProxy Contract to accept ZRC2 tokens *)
+      TransferZRC2ToLockProxy tokenAddr _sender address amount;
       e = {
         _eventname: "TransferZRC2ToLockProxy";
         fromAddress: _sender;
         toAddress: toAddress;
-        assetHash: assetHash;
+        tokenAddr: tokenAddr;
         amount: amount
       };
       event e
@@ -289,12 +287,13 @@ end
 procedure LockProcedure(
   tokenAddr: ByStr20,
   targetProxyHash: ByStr,
-  toAssetHash: ByStr,
-  fromAddr: ByStr20,
+  recoveryAddress: ByStr,
+  fromAssetDenom: ByStr,
+  withdrawFeeAddress: ByStr,
   toAddress: ByStr,
+  toAssetDenom: ByStr,
   amount: Uint256,
-  feeAmount: Uint256,
-  feeAddr: ByStr,
+  withdrawFeeAmount: Uint256,
   l_proxy: ByStr20 with contract 
     field manager_proxy: ByStr20,
     field counterpart_chainId: Uint64,
@@ -302,31 +301,36 @@ procedure LockProcedure(
   end
 )
   ValidateAddrLength targetProxyHash;
-  ValidateHashLength toAssetHash;
+  ValidateHashLength fromAssetDenom;
+  ValidateHashLength recoveryAddress;
   ValidateHashLength toAddress;
+  ValidateHashLength toAssetDenom;
+
   amount_uint128_o = builtin to_uint128 amount;
   match amount_uint128_o with
   | Some amount_uint128 =>
+
     ValidateAmount amount_uint128;
-    fee_amount_uint128_o = builtin to_uint128 feeAmount;
+    fee_amount_uint128_o = builtin to_uint128 withdrawFeeAmount;
     match fee_amount_uint128_o with
     | Some fee_amount_uint128 =>
-
       ValidateFeeAmount fee_amount_uint128 amount_uint128;
-      ValidateAssetRegistration tokenAddr targetProxyHash toAssetHash l_proxy;
-      fromAssetHash = builtin to_bystr tokenAddr;
-      fromAddress = builtin to_bystr fromAddr;
+      ValidateAssetRegistration tokenAddr targetProxyHash fromAssetDenom l_proxy;
+      fromAssetAddress = builtin to_bystr tokenAddr;
       IncreaseNonce;
       n <- nonce;
-
-      transfer_tx_args = TransferTxArgs fromAssetHash toAssetHash toAddress fromAddress amount feeAmount feeAddr n;
+      transfer_tx_args = TransferTxArgs fromAssetAddress fromAssetDenom toAssetDenom recoveryAddress toAddress amount withdrawFeeAmount withdrawFeeAddress;
       tx_data = serialize_transfer_tx_args transfer_tx_args;
-
       counterpartChainId <- & l_proxy.counterpart_chainId;
       CrossChain counterpartChainId targetProxyHash unlock tx_data l_proxy;
-
-      e = { _eventname: "Lock"; fromAssetHash: fromAssetHash; fromAddress: fromAddress; toChainId: counterpartChainId; 
-          toAssetHash: toAssetHash; toAddress: toAddress; amount: amount; feeAmount: feeAmount; tx_data: tx_data};
+      e = { 
+        _eventname: "Lock";
+        fromAssetAddress: fromAssetAddress;
+        toChainId: counterpartChainId;
+        fromAssetDenom: fromAssetDenom;
+        recoveryAddress: recoveryAddress;
+        txArgs: tx_data
+      };
       event e
     | None =>
       e = InvalidFeeAmount;
@@ -344,20 +348,24 @@ end
 
 (* Perform a deposit to the LockProxy contract *)
 (* @param tokenAddr: the address of the token to deposit *)
-(* @param targetProxyHash: the associated proxy hash on Switcheo TradeHub *)
-(* @param toAddress: the hex version of the Switcheo TradeHub address to deposit to *)
-(* @param toAssetHash: the associated asset hash on Swticheo TradeHub *)
-(* @param feeAddr: the hex version of the Switcheo TradeHub address to send the fee to *)
+(* @param recoveryAddress: the hex version of the Switcheo Carbon recovery address to deposit to *)
+(* @param fromAssetDenom: denom of the asset deposited *)
+(* @param withdrawFeeAddress: the hex version of the Switcheo TradeHub address to send the fee to *)
+(* @param toAddress: LockProxy address. Address to transfer assets to *)
+(* @param toAssetDenom: denom of the asset withdrawn on other chain *)
 (* @param amount: the number of tokens to deposit *)
-(* @param feeAmount: the number of tokens to be used as fees *)
+(* @param withdrawFeeAmount: the number of tokens to be used as fees *)
 transition Lock(
   tokenAddr: ByStr20,
-  targetProxyHash: ByStr, 
+  targetProxyHash: ByStr,
+  recoveryAddress: ByStr,
+  fromAssetDenom: ByStr,
+  withdrawFeeAddress: ByStr,
   toAddress: ByStr,
-  toAssetHash: ByStr,
-  feeAddr: ByStr,
+  toAssetDenom: ByStr,
   amount: Uint256,
-  feeAmount: Uint256
+  withdrawFeeAmount: Uint256
+  (* callAmount: Uint256 *)
 )
   IsNotPaused;
   amount_uint128_o = builtin to_uint128 amount;
@@ -372,7 +380,7 @@ transition Lock(
     match maybe_lock_proxy with
     | Some l_proxy =>
       TransferToLockProxy tokenAddr toAddress amount_uint128;
-      LockProcedure tokenAddr targetProxyHash toAssetHash _sender toAddress amount feeAmount feeAddr l_proxy
+      LockProcedure tokenAddr targetProxyHash recoveryAddress fromAssetDenom withdrawFeeAddress toAddress toAssetDenom amount withdrawFeeAmount l_proxy
     | None =>
       e = InvalidLockProxyContract;
       ThrowError e
