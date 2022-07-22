@@ -98,7 +98,6 @@ contract BridgeEntrance(
 
 field admin: ByStr20 = init_admin
 field lock_proxy: ByStr20 = init_lock_proxy
-field nonce: Uint256 = Uint256 0
 field paused: Bool = false
 
 (* Procedures *)
@@ -145,12 +144,6 @@ procedure CrossChain(
         toChainId: toChainId; toContract: toContract; method: method; txData: txData };
   msgs = one_msg msg;
   send msgs
-end
-
-procedure IncreaseNonce()
- old_nonce <- nonce;
- new_nonce = builtin add old_nonce uint256_one;
- nonce := new_nonce
 end
 
 procedure ValidateAddrLength(proxyAddr: ByStr)
@@ -317,8 +310,6 @@ procedure LockProcedure(
       ValidateFeeAmount fee_amount_uint128 amount_uint128;
       ValidateAssetRegistration tokenAddr targetProxyHash fromAssetDenom l_proxy;
       fromAssetAddress = builtin to_bystr tokenAddr;
-      IncreaseNonce;
-      n <- nonce;
       transfer_tx_args = TransferTxArgs fromAssetAddress fromAssetDenom toAssetDenom recoveryAddress toAddress amount withdrawFeeAmount withdrawFeeAddress;
       tx_data = serialize_transfer_tx_args transfer_tx_args;
       counterpartChainId <- & l_proxy.counterpart_chainId;
