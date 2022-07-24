@@ -220,10 +220,11 @@ procedure ValidateAssetRegistration(tokenAddr: ByStr20, proxyAddr: ByStr, fromAs
   end
 end
 
+(* transfer ZRC-2 tokens from _sender to LockProxy contract *)
 (* @param tokenAddr: The asset address in current chain, uniformly named as tokenAddr *)
 (* @param fromAddress: obtained by _sender *)
 (* @param toAddress: LockProxy address *)
-(* @param amount: The amount of ZRC2 tokens to be transferred to the lockProxy  *)
+(* @param amount: The amount of ZRC2 tokens to be transferred to the LockProxy  *)
 procedure TransferZRC2ToLockProxy(tokenAddr: ByStr20, fromAddress: ByStr20, toAddress: ByStr20, amount: Uint128)
   msg_to_zrc2 = {_tag: "TransferFrom"; _recipient: tokenAddr; _amount: uint128_zero; 
                   from: fromAddress; to: toAddress; amount: amount};
@@ -231,6 +232,9 @@ procedure TransferZRC2ToLockProxy(tokenAddr: ByStr20, fromAddress: ByStr20, toAd
   send msgs
 end
 
+(* transfer ZIL tokens from _sender to LockProxy contract *)
+(* @param toAddress: LockProxy address *)
+(* @param amount: The amount of ZRC2 tokens to be transferred to the LockProxy  *)
 procedure TransferNativeZILToLockProxy(toAddress: ByStr20, amount: Uint128)
   msg = {_tag: "AddFunds"; _recipient: toAddress; _amount: amount };
   msgs = one_msg msg;
@@ -238,41 +242,35 @@ procedure TransferNativeZILToLockProxy(toAddress: ByStr20, amount: Uint128)
 end
 
 (* transfer asset from _sender to LockProxy contract *)
-(* @param tokenAddr: the address of the token to deposit *)
-(* @param toAddress: The address that the asset is sent to. In this case, the LockProxy address *)
-procedure TransferToLockProxy(tokenAddr: ByStr20, toAddress: ByStr, amount: Uint128)
-  to_address = builtin to_bystr20 toAddress;
-  match to_address with
-  | Some address =>
-    (* if people choose to lock native zil, then tokenAddr should be 0x0000000000000000000000000000000000000000 *)
-    is_asset_zil = builtin eq tokenAddr zero_address;
-    match is_asset_zil with
-    | True =>
-      (* Send message to the LockProxy contract to accept the ZIL *)
-      TransferNativeZILToLockProxy address amount;
-      e = {
-        _eventname: "TransferNativeZILToLockProxy";
-        fromAddress: _sender;
-        toAddress: toAddress;
-        tokenAddr: tokenAddr;
-        amount: amount
-      };
-      event e
-    | False =>
-      (* Send message to LockProxy Contract to accept ZRC2 tokens *)
-      TransferZRC2ToLockProxy tokenAddr _sender address amount;
-      e = {
-        _eventname: "TransferZRC2ToLockProxy";
-        fromAddress: _sender;
-        toAddress: toAddress;
-        tokenAddr: tokenAddr;
-        amount: amount
-      };
-      event e
-    end
-  | None => 
-    e = InvalidAddress;
-    ThrowError e
+(* @param tokenAddr: Address of the token to deposit *)
+(* @param lock_proxy: LockProxy address *)
+(* @param amount: Amount to be transferred to LockProxy *)
+procedure TransferToLockProxy(tokenAddr: ByStr20, lock_proxy: ByStr20, amount: Uint128)
+  (* Check if token is ZIL *)
+  is_asset_zil = builtin eq tokenAddr zero_address;
+  match is_asset_zil with
+  | True =>
+   (* Transfer ZIL to LockProxy *)
+    TransferNativeZILToLockProxy lock_proxy amount;
+    e = {
+      _eventname: "TransferNativeZILToLockProxy";
+      fromAddress: _sender;
+      toAddress: toAddress;
+      tokenAddr: tokenAddr;
+      amount: amount
+    };
+    event e
+  | False =>
+   (* Transfer ZRC-2 tokens to LockProxy *)
+    TransferZRC2ToLockProxy tokenAddr _sender lock_proxy amount;
+    e = {
+      _eventname: "TransferZRC2ToLockProxy";
+      fromAddress: _sender;
+      toAddress: toAddress;
+      tokenAddr: tokenAddr;
+      amount: amount
+    };
+    event e
   end
 end
 
@@ -356,7 +354,6 @@ transition Lock(
   toAssetDenom: ByStr,
   amount: Uint256,
   withdrawFeeAmount: Uint256
-  (* callAmount: Uint256 *)
 )
   IsNotPaused;
   amount_uint128_o = builtin to_uint128 amount;
@@ -370,7 +367,7 @@ transition Lock(
       end;
     match maybe_lock_proxy with
     | Some l_proxy =>
-      TransferToLockProxy tokenAddr toAddress amount_uint128;
+      TransferToLockProxy tokenAddr l_proxy amount_uint128;
       LockProcedure tokenAddr targetProxyHash recoveryAddress fromAssetDenom withdrawFeeAddress toAddress toAssetDenom amount withdrawFeeAmount l_proxy
     | None =>
       e = InvalidLockProxyContract;
@@ -404,4 +401,13 @@ end
 transition UpdateLockProxy(new_lock_proxy: ByStr20)
   IsAdmin;
   lock_proxy:= new_lock_proxy
+end
+
+(*************************************)
+(*             Callbacks             *)
+(*************************************)
+
+(* @dev: Handle callback after sending ZRC-2 tokens to LockProxy via TransferFrom *)
+transition TransferFromSuccessCallBack(initiator: ByStr20, sender: ByStr20, recipient: ByStr20, amount: Uint128)
+  (* no-op *)
 end
