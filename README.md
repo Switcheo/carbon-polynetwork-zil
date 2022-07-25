@@ -33,6 +33,11 @@
     + [Housekeeping Transitions](#housekeeping-transitions)
     + [Bridge Transitions](#bridge-transitions)
     + [Admin Transitions](#admin-transitions)
+- [BridgeEntrace Contract Specification](#)
+  * [Roles and Privileges](#roles-and-privileges)
+  * [Immutable Parameters](#immutable-parameters)
+  * [Mutable Fields](#mutable-fields)
+  * [Transitions](#transitions)
 - [Multi-signature Wallet Contract Specification](#multi-sigature)
   * [General Flow](#general-flow)
   * [Roles and Privileges](#roles-and-privileges-2)
@@ -403,6 +408,95 @@ The table below presents the mutable fields of the contract and their initial va
 |`WithdWithdrawZRC2rawZIL`| `token: ByStr20, amount: Uint128` | Withdraw zrc2 token to admin acount|:heavy_check_mark: | <center>:x:</center> |
 |`SetManager`| `new_manager: ByStr20` | Setup cross chain manager contract|:heavy_check_mark: | :heavy_check_mark: |
 |`SetManagerProxy`| `new_manager_proxy: ByStr20` | Setup cross chain manager proxy contract|:heavy_check_mark: | :heavy_check_mark: |
+
+# BridgeEntrance Contract Specification
+
+`BridgeEntrance` is a Switcheo version contract that builds on the `LockProxy`, allowing people to lock ZRC2 tokens and native zils in the LockProxy contract and while getting corresponding tokens in the target chain simultaneously (e.g. ERC20 in ethereum) and vice versa.
+
+## Roles and Privileges
+
+The table below describes the roles and privileges that this contract defines:
+
+| Role | Description & Privileges|                                    
+| --------------- | ------------------------------------------------- |
+| `init_admin`      | The initial admin of the contract which is usually the creator of the contract. `init_admin` is also the initial value of admin. |
+| `current_admin`    | Current `admin` of the contract initialized to `init_admin`. Certain critical actions can only be performed by the `admin`. |
+| `pending_admin`    | Next `admin` of the contract initialized to `none`. Used during the transfer of ownership. |
+| `init_lock_proxy` | The initial LockProxy contract address |
+| `lock_proxy` | The current LockProxy contract address. |
+
+The contract defines and uses several custom ADTs that we describe below:
+
+1. Error Data Type:
+
+```ocaml
+type Error = 
+  | AmountCannotBeZero
+  | AssetNotRegistered
+  | ContractPaused
+  | EmptyHashStr
+  | IllegalAmount
+  | IllegalRegisterAssetArgs
+  | InvalidFeeAmount
+  | InvalidLockProxyContract
+  | NotPendingAdmin
+  | NotAdmin
+  | PendingAdminNotEmpty
+```
+
+2. Cross-Chain Transaction Data Type:
+
+```ocaml
+(* used for cross-chain lock and unlock methods *)
+(* fromAssetAddress fromAssetDenom toAssetDenom recoveryAddress toAddress amount withdrawFeeAmount withdrawFeeAddress *)
+type TransferTxArgs =
+| TransferTxArgs of ByStr ByStr ByStr ByStr ByStr Uint256 Uint256 ByStr
+```
+
+## Immutable Parameters
+
+The table below lists the parameters that are defined at the contract deployment time and hence cannot be changed later on.
+
+| Name | Type | Description |
+|--|--|--|
+|`init_admin`| `ByStr20` | The initial address of the admin. |
+|`init_lock_proxy`| `ByStr20` | The initial LockProxy address. |
+
+## Mutable Fields
+
+The table below presents the mutable fields of the contract and their initial values.
+
+| Name | Type | Initial Value |Description |
+|--|--|--|--|
+|`current_admin`| `Option ByStr20` | `init_admin` | Current `admin` of the contract. |
+|`pending_admin`| `Option ByStr20` | `None {ByStr20}` | Next `admin` of the contract. |
+|`lock_proxy`| `ByStr20` | `init_lock_proxy` | Address of the current `LockProxy` contract. |
+|`paused`| `Bool` | `False` | A Boolean field that shows if the contract is `paused`  |
+
+## Transitions
+
+### Housekeeping Transitions
+
+| Name        | Params     | Description | Callable when paused? | Callable when not paused? | 
+| ----------- | -----------|-------------|:--------------------------:|:--------------------------:|
+| `Pause` | | Pause the contract temporarily to stop any critical transition from being invoked. | :heavy_check_mark: | :heavy_check_mark: |
+| `Unpause` | | Un-pause the contract to re-allow the invocation of all transitions. | :heavy_check_mark: | :heavy_check_mark: |
+| `UpdateLockProxy` | `new_lock_proxy: ByStr20` | Set a new `lock_proxy` by `current_admin`.| :heavy_check_mark: | :heavy_check_mark: |
+| `RevokeOwnership` |  | Removes the `contract current_admin`. | :heavy_check_mark: | :heavy_check_mark: |
+| `TransferOwnership` |  | Transfers contract ownership to `pending_admin`. | :heavy_check_mark: | :heavy_check_mark: |
+| `AcceptOwnership` |  | `pending_admin` finalizes the transfer of contract ownership. | :heavy_check_mark: | :heavy_check_mark: 
+
+### Bridge Transitions
+
+| Name | Params | Description | Callable when paused? | Callable when not paused? | 
+|--|--|--|:----:|:----:|
+|`lock`| `tokenAddr: ByStr20, targetProxyHash: ByStr, recoveryAddress: ByStr, fromAssetDenom: ByStr,  withdrawFeeAddress: ByStr, toAddress: ByStr, toAssetDenom: ByStr, amount: Uint256, withdrawFeeAmount: Uint256` | Invoked by the user, a certain amount of tokens will be locked in the LockProxy contract, then the same amount of tokens will be unlocked from target chain proxy contract at the target chain with chainId later.| <center>:x:</center> | :heavy_check_mark: |
+
+### Callback Transitions
+
+| Name | Params | Description | Callable when paused? | Callable when not paused? | 
+|--|--|--|:----:|:----:|
+|`TransferFromSuccessCallBack`| `initiator: ByStr20, sender: ByStr20` | Callback used when transferring ZRC-2 tokens using `TransferFrom`|:heavy_check_mark: | :heavy_check_mark: |
 
 # Multi-signature Wallet Contract Specification
 
