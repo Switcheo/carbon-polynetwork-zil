@@ -108,6 +108,16 @@ procedure ThrowError(err: Error)
   throw e
 end
 
+procedure IsNotPaused()
+  paused_tmp <- paused;
+  match paused_tmp with
+  | False =>
+  | True  =>
+    e = ContractPaused;
+    ThrowError e
+  end
+end
+
 procedure IsAdmin(address: ByStr20)
   maybe_current_admin <- current_admin;
   match maybe_current_admin with
@@ -122,16 +132,6 @@ procedure IsAdmin(address: ByStr20)
   | None =>
     err = NotAdmin;
     ThrowError err
-  end
-end
-
-procedure IsNotPaused()
-  paused_tmp <- paused;
-  match paused_tmp with
-  | False =>
-  | True  =>
-    e = ContractPaused;
-    ThrowError e
   end
 end
 
