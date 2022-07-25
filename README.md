@@ -33,7 +33,7 @@
     + [Housekeeping Transitions](#housekeeping-transitions)
     + [Bridge Transitions](#bridge-transitions)
     + [Admin Transitions](#admin-transitions)
-- [BridgeEntrace Contract Specification](#)
+- [BridgeEntrance Contract Specification](#bridgeentrance-contract-specification)
   * [Roles and Privileges](#roles-and-privileges)
   * [Immutable Parameters](#immutable-parameters)
   * [Mutable Fields](#mutable-fields)
@@ -482,9 +482,9 @@ The table below presents the mutable fields of the contract and their initial va
 | `Pause` | | Pause the contract temporarily to stop any critical transition from being invoked. | :heavy_check_mark: | :heavy_check_mark: |
 | `Unpause` | | Un-pause the contract to re-allow the invocation of all transitions. | :heavy_check_mark: | :heavy_check_mark: |
 | `UpdateLockProxy` | `new_lock_proxy: ByStr20` | Set a new `lock_proxy` by `current_admin`.| :heavy_check_mark: | :heavy_check_mark: |
-| `RevokeOwnership` |  | Removes the `contract current_admin`. | :heavy_check_mark: | :heavy_check_mark: |
+| `RevokeOwnership` |  | Removes the `current_admin`. | :heavy_check_mark: | :heavy_check_mark: |
 | `TransferOwnership` |  | Transfers contract ownership to `pending_admin`. | :heavy_check_mark: | :heavy_check_mark: |
-| `AcceptOwnership` |  | `pending_admin` finalizes the transfer of contract ownership. | :heavy_check_mark: | :heavy_check_mark: 
+| `AcceptOwnership` |  | Finalization of the transfer of contract ownership by `pending_admin`. | :heavy_check_mark: | :heavy_check_mark: 
 
 ### Bridge Transitions
 
