@@ -15,6 +15,7 @@ let zero_address = 0x0000000000000000000000000000000000000000
 let zero_bystr = let a = 0x in builtin to_bystr a
 let true = True
 let false = False
+let none = None {ByStr20}
 
 (* it is unlock *)
 let unlock = let a = 0x756e6c6f636b in builtin to_bystr a
@@ -25,33 +26,35 @@ type TransferTxArgs =
 | TransferTxArgs of ByStr ByStr ByStr ByStr ByStr Uint256 Uint256 ByStr
 
 type Error = 
-  | AmountCannotBeZero
-  | AssetNotRegistered
-  | ContractPaused
-  | ContractNotPaused
-  | EmptyHashStr
-  | IllegalAmount
-  | IllegalRegisterAssetArgs
-  | InvalidFeeAmount
-  | InvalidAddress
-  | InvalidLockProxyContract
-  | NotAdmin
+  | CodeAmountCannotBeZero
+  | CodeAssetNotRegistered
+  | CodePendingAdminNotEmpty
+  | CodeNotPendingAdmin
+  | CodeNotAdmin
+  | CodeContractPaused
+  | CodeContractNotPaused
+  | CodeEmptyHashStr
+  | CodeIllegalAmount
+  | CodeIllegalRegisterAssetArgs
+  | CodeInvalidFeeAmount
+  | CodeInvalidLockProxyContract
 
 let make_error =
   fun (result: Error) =>
     let result_code =
       match result with
-      | AmountCannotBeZero                => Int32 -1
-      | AssetNotRegistered                => Int32 -2
-      | ContractPaused                    => Int32 -3
-      | ContractNotPaused                 => Int32 -4
-      | EmptyHashStr                      => Int32 -5
-      | IllegalAmount                     => Int32 -6
-      | IllegalRegisterAssetArgs          => Int32 -7
-      | InvalidFeeAmount                  => Int32 -8
-      | InvalidAddress                    => Int32 -9
-      | InvalidLockProxyContract          => Int32 -10
-      | NotAdmin                          => Int32 -11
+      | CodeAmountCannotBeZero            => Int32 -1
+      | CodeAssetNotRegistered            => Int32 -2
+      | CodePendingAdminNotEmpty          => Int32 -3
+      | CodeNotPendingAdmin               => Int32 -4
+      | CodeNotAdmin                      => Int32 -5
+      | CodeContractPaused                => Int32 -6
+      | CodeContractNotPaused             => Int32 -7
+      | CodeEmptyHashStr                  => Int32 -8
+      | CodeIllegalAmount                 => Int32 -9
+      | CodeIllegalRegisterAssetArgs      => Int32 -10
+      | CodeInvalidFeeAmount              => Int32 -11
+      | CodeInvalidLockProxyContract      => Int32 -13
       end
     in
     { _exception: "Error"; code: result_code }
@@ -96,9 +99,11 @@ contract BridgeEntrance(
   init_lock_proxy: ByStr20
 )
 
-field admin: ByStr20 = init_admin
 field lock_proxy: ByStr20 = init_lock_proxy
 field paused: Bool = false
+
+field current_admin : Option ByStr20 = Some {ByStr20} init_admin
+field pending_admin : Option ByStr20 = none
 
 (* Procedures *)
 procedure ThrowError(err: Error)
@@ -106,15 +111,21 @@ procedure ThrowError(err: Error)
   throw e
 end
 
-procedure IsAdmin()
-  contract_admin <- admin;
-  equal = builtin eq _sender contract_admin;
-  match equal with
-  | True =>
-  | False =>
-    e = NotAdmin;
-    ThrowError e
-  end  
+procedure IsAdmin(address: ByStr20)
+  maybe_current_admin <- current_admin;
+  match maybe_current_admin with
+  | Some current_admin =>
+    is_admin = builtin eq current_admin address;
+    match is_admin with
+    | True =>
+    | False =>
+      err = CodeNotAdmin;
+      ThrowError err
+    end
+  | None =>
+    err = CodeNotAdmin;
+    ThrowError err
+  end
 end
 
 procedure IsNotPaused()
@@ -122,8 +133,35 @@ procedure IsNotPaused()
   match paused_tmp with
   | False =>
   | True  =>
-    e = ContractPaused;
+    e = CodeContractPaused;
     ThrowError e
+  end
+end
+
+procedure NoPendingAdmin()
+  maybe_pending_admin <- pending_admin;
+  match maybe_pending_admin with
+  | Some p =>
+    err = CodePendingAdminNotEmpty;
+    ThrowError err
+  | None =>
+  end
+end
+
+procedure IsPendingAdmin(address: ByStr20)
+  maybe_pending_admin <- pending_admin;
+  match maybe_pending_admin with
+  | Some current_pending_admin =>
+    is_pending_owner = builtin eq current_pending_admin address;
+    match is_pending_owner with
+    | True =>
+    | False =>
+      err = CodeNotPendingAdmin;
+      ThrowError err
+    end
+  | None =>
+    err = CodeNotPendingAdmin;
+    ThrowError err
   end
 end
 
@@ -152,7 +190,7 @@ procedure ValidateAddrLength(proxyAddr: ByStr)
   match is_addr with
   | True =>
   | False =>
-    e = IllegalRegisterAssetArgs;
+    e = CodeIllegalRegisterAssetArgs;
     ThrowError e
   end
 end
@@ -162,7 +200,7 @@ procedure ValidateAmount(amount: Uint128)
   is_zero = builtin eq amount uint128_zero;
   match is_zero with
   | True =>
-    e =  AmountCannotBeZero;
+    e = CodeAmountCannotBeZero;
     ThrowError e
   | False =>
   end
@@ -174,7 +212,7 @@ procedure ValidateFeeAmount(feeAmount: Uint128, amount: Uint128)
   match less with
   | True =>
   | False =>
-    e = InvalidFeeAmount;
+    e = CodeInvalidFeeAmount;
     ThrowError e
   end
 end
@@ -184,7 +222,7 @@ procedure ValidateHashLength(hash: ByStr)
   zero_length = builtin eq hash_length uint32_zero;
   match zero_length with
   | True =>
-    e = EmptyHashStr;
+    e = CodeEmptyHashStr;
     ThrowError e
   | False =>
   end
@@ -211,11 +249,11 @@ procedure ValidateAssetRegistration(tokenAddr: ByStr20, proxyAddr: ByStr, fromAs
     match registered with
     | True =>
     | False =>
-      e = AssetNotRegistered;
+      e = CodeAssetNotRegistered;
       ThrowError e
     end
   | None => 
-    e = AssetNotRegistered;
+    e = CodeAssetNotRegistered;
     ThrowError e
   end
 end
@@ -322,11 +360,11 @@ procedure LockProcedure(
       };
       event e
     | None =>
-      e = InvalidFeeAmount;
+      e = CodeInvalidFeeAmount;
       ThrowError e
     end
   | None =>
-    e = IllegalAmount;
+    e = CodeIllegalAmount;
     ThrowError e
   end
 end
@@ -370,11 +408,11 @@ transition Lock(
       TransferToLockProxy tokenAddr l_proxy amount_uint128;
       LockProcedure tokenAddr targetProxyHash recoveryAddress fromAssetDenom withdrawFeeAddress toAddress toAssetDenom amount withdrawFeeAmount l_proxy
     | None =>
-      e = InvalidLockProxyContract;
+      e = CodeInvalidLockProxyContract;
       ThrowError e
     end
   | None =>
-    e = IllegalAmount;
+    e = CodeIllegalAmount;
     ThrowError e
   end
 end
@@ -384,23 +422,69 @@ end
 (***************************************************)
 
 transition Pause()
-  IsAdmin;
-  paused:= true
+  IsAdmin _sender;
+  paused:= true;
+  e = { 
+    _eventname: "Pause";
+    sender: _sender
+  };
+  event e
 end
 
 transition Unpause()
-  IsAdmin;
-  paused:= false
+  IsAdmin _sender;
+  paused:= false;
+  e = { 
+    _eventname: "Unpause";
+    sender: _sender
+  };
+  event e
 end
 
-transition UpdateAdmin(newAdmin: ByStr20)
-  IsAdmin;
-  admin:= newAdmin
-end
-
+(* @dev: Update LockProxy *)
 transition UpdateLockProxy(new_lock_proxy: ByStr20)
-  IsAdmin;
-  lock_proxy:= new_lock_proxy
+  IsAdmin _sender;
+  l_proxy <- lock_proxy;
+  equal = builtin eq l_proxy new_lock_proxy;
+  match equal with
+  | True =>
+    e = CodeInvalidLockProxyContract;
+    ThrowError e
+  | False =>
+    lock_proxy:= new_lock_proxy;
+    e = {_eventname : "UpdatedLockProxy"; intial_lock_proxy: l_proxy; new_lock_proxy: new_lock_proxy};
+    event e
+  end
+end
+
+(* @dev: Removes the current_owner. Must not have a pending owner. *)
+transition RevokeOwnership()
+  IsAdmin _sender;
+  NoPendingAdmin;
+  current_admin := none;
+  e = {_eventname : "OwnershipRevoked"; current_admin : _sender};
+  event e
+end
+
+(* @dev: Transfers contract ownership to a new address. The new address must call the AcceptOwnership transition to finalize the transfer. *)
+(* @param new_admin: Address of the new admin *)
+transition TransferOwnership(new_admin: ByStr20)
+  IsAdmin _sender;
+  o = Some {ByStr20} new_admin;
+  pending_admin := o;
+  e = {_eventname : "OwnershipTransferInitiated"; current_admin : _sender; pending_admin : new_admin};
+  event e
+end
+
+(* @dev: Finalizes transfer of contract ownership. Must be called by the new current_owner *)
+transition AcceptOwnership()
+  IsPendingAdmin _sender;
+  previous_current_admin <- current_admin;
+  o = Some {ByStr20} _sender;
+  current_admin := o;
+  pending_admin := none;
+  e = {_eventname : "OwnershipTransferAccepted"; previous_current_admin : previous_current_admin; current_admin : _sender};
+  event e
 end
 
 (*************************************)
