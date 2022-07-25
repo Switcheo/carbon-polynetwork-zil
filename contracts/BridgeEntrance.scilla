@@ -255,7 +255,7 @@ procedure TransferToLockProxy(tokenAddr: ByStr20, lock_proxy: ByStr20, amount: U
     e = {
       _eventname: "TransferNativeZILToLockProxy";
       fromAddress: _sender;
-      toAddress: toAddress;
+      toAddress: lock_proxy;
       tokenAddr: tokenAddr;
       amount: amount
     };
@@ -266,7 +266,7 @@ procedure TransferToLockProxy(tokenAddr: ByStr20, lock_proxy: ByStr20, amount: U
     e = {
       _eventname: "TransferZRC2ToLockProxy";
       fromAddress: _sender;
-      toAddress: toAddress;
+      toAddress: lock_proxy;
       tokenAddr: tokenAddr;
       amount: amount
     };
@@ -338,10 +338,10 @@ end
 (* Perform a deposit to the LockProxy contract *)
 (* @param tokenAddr: the address of the token to deposit *)
 (* @param recoveryAddress: the hex version of the Switcheo Carbon recovery address to deposit to *)
-(* @param fromAssetDenom: denom of the asset deposited *)
+(* @param fromAssetDenom: denom of the asset deposited, in hex *)
 (* @param withdrawFeeAddress: the hex version of the Switcheo TradeHub address to send the fee to *)
 (* @param toAddress: LockProxy address. Address to transfer assets to *)
-(* @param toAssetDenom: denom of the asset withdrawn on other chain *)
+(* @param toAssetDenom: denom of the asset withdrawn on other chain, in hex *)
 (* @param amount: the number of tokens to deposit *)
 (* @param withdrawFeeAmount: the number of tokens to be used as fees *)
 transition Lock(
