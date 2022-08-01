@@ -13,16 +13,20 @@ library ZilCrossChainManagerV2
 let true = True
 let false = False
 let zero_amt = Uint128 0
+let zero_string = "0"
+let ten_string = "10"
 let one = Uint256 1
 let none = None {ByStr20}
 let big_endian = BigEndian
 let padding = let x = 0x00 in builtin to_bystr x
+let ten_padding = let x = 0x10 in builtin to_bystr x
 let nil_address = 0x0000000000000000000000000000000000000000
+let one_address = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 let empty_abi_encoded_string = 0x000000000000000000000000000000000000000000000000000000000000000000000000
-let zion_ccm_address = 0x5747C05FF236F8d18BB21Bc02ecc389deF853cae
+let zion_ccm_address = 0x0000000000000000000000000000000000001003
 let address_list_length = @list_length ByStr20
 
-let zilliqa_chain_id = Uint64 88
+let zilliqa_chain_id = Uint64 333
 let zion_seal_length = Uint32 67     (* rlpPrefix: 2 , r: 32 , s:32 , v:1 *)
 let zion_peer_length = Uint32 93     (* rlpPrefix: 2 , pk_rlp: 70 , address_rlp: 21 *)
 let zion_address_length = Uint32 21  (* rlpPrefix: 1 , address: 20 *)
@@ -32,21 +36,36 @@ let u0x00 = Uint32 0
 let u0x01 = Uint32 1
 let u0x02 = Uint32 2
 let u0x03 = Uint32 3
+let u0x04 = Uint32 4
+let u0x05 = Uint32 5
 let u0x08 = Uint32 8
+let u0x0a = Uint32 10
 let u0x0c = Uint32 12
+let u0x10 = Uint32 16
+let u0x11 = Uint32 17
 let u0x14 = Uint32 20
+let u0x15 = Uint32 21
+let u0x16 = Uint32 22
+let u0x17 = Uint32 23
 let u0x1f = Uint32 31
 let u0x20 = Uint32 32
 let u0x40 = Uint32 64
 let u0x80 = Uint32 128
 let u0xb6 = Uint32 182
 let u0xb7 = Uint32 183
+let u0xb8 = Uint32 184
+let u0xba = Uint32 186
 let u0xc0 = Uint32 192
+let u0xd5 = Uint32 213
+let u0xd6 = Uint32 214
 let u0xd7 = Uint32 215
 let u0xe0 = Uint32 224
 let u0xf6 = Uint32 246
 let u0xf7 = Uint32 247
+let u0xf8 = Uint32 248
+let u0xf9 = Uint32 249
 let u0x117 = Uint32 279
+let u0x115 = Uint32 277
 
 (* Error events *)
 type Error =
@@ -60,6 +79,10 @@ type Error =
   | CodeInvalidToChainID
   | CodeInvalidToContract
   | CodeTxAlreadyExecuted
+  | CodeVerifyProofFailed
+  | CodeUnequalNodeHash
+  | CodeCompareKeyFailed
+  | CodeKeyLengthNotZero
 
 let make_error =
   fun (result : Error) =>
@@ -75,6 +98,10 @@ let make_error =
       | CodeInvalidToChainID          => Int32 -8
       | CodeInvalidToContract         => Int32 -9
       | CodeTxAlreadyExecuted         => Int32 -10
+      | CodeVerifyProofFailed         => Int32 -11
+      | CodeUnequalNodeHash           => Int32 -12
+      | CodeCompareKeyFailed          => Int32 -13
+      | CodeKeyLengthNotZero          => Int32 -14
       end
     in
     { _exception : "Error"; code : result_code }
@@ -96,6 +123,13 @@ let get_number : Header -> Uint256 =
     number
   end
 
+let get_root : Header -> ByStr =
+  fun (h : Header) =>
+  match h with
+  | Header root number =>
+    root
+  end
+
 (* Cross chain tx params *)
 type TxParam =
   | TxParam of
@@ -114,6 +148,58 @@ type CrossTx =
     Uint64  (* fromChainId *)
     TxParam (* cross chain tx param *)
 
+type KeyOffsetValue = 
+  | KeyOffsetValue of ByStr Uint32 ByStr (* key, offset, value *)
+  
+let get_number : Header -> Uint256 =
+  fun (h : Header) =>
+    match h with
+    | Header root number =>
+      number
+    end
+  
+(* extracts the key from KeyOffsetValue ADT *)
+let get_key : KeyOffsetValue -> ByStr =
+  fun (kov : KeyOffsetValue) =>
+    match kov with
+    | KeyOffsetValue key offset value =>
+      key
+    end
+  
+(* extracts the offset from KeyOffsetValue ADT *)
+let get_key_offset : KeyOffsetValue -> Uint32 =
+  fun (kov : KeyOffsetValue) =>
+    match kov with
+    | KeyOffsetValue key offset value =>
+      offset
+    end
+  
+(* extracts the value from KeyOffsetValue ADT *) 
+let get_value : KeyOffsetValue -> ByStr =
+  fun (kov : KeyOffsetValue) =>
+    match kov with
+    | KeyOffsetValue key offset value =>
+      value
+    end
+  
+(* extracts the keySlice from Pair (keySlice, isIn) *)
+let get_key_slice : Pair ByStr Bool -> ByStr = @fst ByStr Bool
+  
+(* extracts the isIn from Pair (keySlice, isIn) *)
+let get_is_in : Pair ByStr Bool -> Bool = @snd ByStr Bool
+  
+(* extracts the buffer from Pair (buffer, index) *)
+let get_buffer : Pair ByStr Uint32 -> ByStr = @fst ByStr Uint32
+  
+(* extracts the index from Pair (buffer, index) *)
+let get_index : Pair ByStr Uint32 -> Uint32 = @snd ByStr Uint32
+  
+(* extracts the final value from verify_proof Pair (value, isSuccessful) *)
+let get_verify_proof_value : Pair ByStr Bool -> ByStr = @fst ByStr Bool
+  
+(* extracts the boolean from verify_proof Pair (value, isSuccessful) *)
+let get_verify_proof_success : Pair ByStr Bool -> Bool = @snd ByStr Bool
+
 (* converts a Uint32 to a Uint256 *)
 let grow : Uint32 -> Uint256 =
   fun (var : Uint32) =>
@@ -128,6 +214,9 @@ let get_address : Pair ByStr20 Uint32 -> ByStr20 = @fst ByStr20 Uint32
 
 (* extracts the data from Pair (data, offset) *)
 let get_data : Pair ByStr Uint32 -> ByStr = @fst ByStr Uint32
+
+(* extracts the offset from Pair (data, offset) *)
+let get_split_offset : Pair ByStr Uint32 -> Uint32 = @snd ByStr Uint32
 
 (* extracts the size from Pair (size, offset) *)
 let get_size : Pair Uint32 Uint32 -> Uint32 = @fst Uint32 Uint32
@@ -150,6 +239,17 @@ let pad : ByStr -> Uint32 -> ByStr =
     let padding_length = builtin sub required_length current_length in
     let fold = @nat_fold ByStr in
     let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat padding cur in
+    let count = builtin to_nat padding_length in
+    fold fn buffer count
+
+(* right pads a byte string with 0s *)
+let right_pad : ByStr -> Uint32 -> ByStr =
+  fun (buffer : ByStr) =>
+  fun (required_length : Uint32) =>
+    let current_length = builtin strlen buffer in
+    let padding_length = builtin sub required_length current_length in
+    let fold = @nat_fold ByStr in
+    let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat cur padding in
     let count = builtin to_nat padding_length in
     fold fn buffer count
 
@@ -229,7 +329,7 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
               }
             *)
             let idx = builtin add offset u0x01 in
-            let len = builtin sub u0xd7 k in (* we don't have to multiply by 8 here, as len is in bytes *)
+            let len = builtin sub u0xd5 k in (* we don't have to multiply by 8 here, as len is in bytes *)
             let size_bz = builtin substr raw idx len in
             let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
             let size = extract_uint32 big_endian size_bz_padded u0x00 in
@@ -271,7 +371,7 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
               }
             *)
             let idx = builtin add offset u0x01 in
-            let len = builtin sub u0x117 k in (* we don't have to multiply by 8 here, as len is in bytes *)
+            let len = builtin sub u0x115 k in (* we don't have to multiply by 8 here, as len is in bytes *)
             let size_bz = builtin substr raw idx len in
             let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
             let size = extract_uint32 big_endian size_bz_padded u0x00 in
@@ -284,6 +384,135 @@ let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
             | Some p => match p with | Pair s _ =>
               let next_offset = let x = builtin sub k u0xf6 in builtin add x offset in
               Pair {Uint32 Uint32} s next_offset
+            end end
+          end
+          end
+          end
+          end
+        end
+      end
+
+let old_rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
+    fun (raw : ByStr) =>
+    fun (offset : Uint32) =>
+      (*
+        assembly {
+            k := shr(0xf8,mload(add(raw,offset)))
+            // shift word at position offset in raw by 0xf8 (248 bits)
+            // => i.e. remove last 248 bits and read the first 256-248 = 8 bits = 1 byte
+        }
+      *)
+      let res = extract_bystr1 raw offset in
+      match res with
+      | None =>
+        (* ERR! just blow up here *)
+        let exception_code = Uint32 1001 in (* make this err easy to find *)
+        let size = builtin sub u0x00 exception_code in
+        Pair {Uint32 Uint32} size offset
+      | Some pair =>
+        match pair with
+        | Pair k_bystr _ =>
+          let k = builtin to_uint32 k_bystr in
+          let lt_0x80 = builtin lt k u0x80 in
+          let lt_0xb7 = builtin lt k u0xb7 in
+          let lt_0xc0 = builtin lt k u0xc0 in
+          let lt_0xf7 = builtin lt k u0xf7 in
+          match lt_0x80 with | True =>
+          (*
+            if (k<0x80) {
+              assembly {
+                  size := 1
+                  offset_ := offset
+              }
+              return (size,offset_);
+            }
+          *)
+            let size = u0x01 in
+            Pair {Uint32 Uint32} size offset | False =>
+          match lt_0xb7 with | True =>
+            (*
+            if (k<0xb7) {
+                assembly {
+                  size := sub(k,0x80)
+                  offset_ := add(offset,1)
+                }
+                return (size,offset_);
+            }
+            *)
+            let size = builtin sub k u0x80 in
+            let next_offset = builtin add offset u0x01 in
+            Pair {Uint32 Uint32} size next_offset | False =>
+          match lt_0xc0 with | True =>
+            (*
+            if (k<0xc0) {
+                assembly {
+                  size := shr(mul(8,sub(0xd7,k)),mload(add(add(raw,offset),0x01)))
+                  // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
+                  // shift is 8*(0xd7 - k) => this determines how many bytes to read in for the size
+                  // => this can be from 23 to 32 bytes
+                  // so we just need to cut the raw bystr from (offset + 1) to (0xd7 - k) and convert it to a uint32
+                  offset_ := add(offset,sub(k,0xb6))
+                  // next offset is offset + (k - 0xb6)
+                }
+                return (size,offset_);
+            }
+            *)
+            let idx = builtin add offset u0x01 in
+            let len = builtin sub u0xd7 k in (* we don't have to multiply by 8 here, as len is in bytes *)
+            let size_bz = builtin substr raw idx len in
+            let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
+            let size = extract_uint32 big_endian size_bz_padded u0x00 in
+            match size with
+            | None =>
+            (* ERR! just blow up here *)
+            let exception_code = Uint32 1002 in (* make this err easy to find *)
+            let s = builtin sub u0x00 exception_code in
+            Pair {Uint32 Uint32} s offset
+            | Some p => match p with | Pair s _ =>
+            let next_offset = let x = builtin sub k u0xb6 in builtin add x offset in
+            Pair {Uint32 Uint32} s next_offset
+            end end | False =>
+          match lt_0xf7 with | True =>
+            (*
+            if (k<0xf7) {
+                assembly {
+                  size := sub(k,0xc0)
+                  offset_ := add(offset,1)
+                }
+                return (size,offset_);
+            }
+            *)
+            let size = builtin sub k u0xc0 in
+            let next_offset = builtin add offset u0x01 in
+            Pair {Uint32 Uint32} size next_offset
+          | False =>
+            (*
+            {
+                assembly {
+                  size := shr(mul(8,sub(0x117,k)),mload(add(add(raw,offset),0x01)))
+                  // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
+                  // shift is 8*(0x117 - k) => this determines how many bytes to read in for the size
+                  // => this can be from 14 to 31 bytes
+                  // so we just need to cut the bystr from (offset + 1) to (0x117 - k) and convert it to a uint32
+                  offset_ := add(offset,sub(k,0xf6))
+                  // next offset is offset + (k - 0xf6)
+                }
+            }
+            *)
+            let idx = builtin add offset u0x01 in
+            let len = builtin sub u0x117 k in (* we don't have to multiply by 8 here, as len is in bytes *)
+            let size_bz = builtin substr raw idx len in
+            let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
+            let size = extract_uint32 big_endian size_bz_padded u0x00 in
+            match size with
+            | None =>
+            (* ERR! just blow up here *)
+            let exception_code = Uint32 1003 in (* make this err easy to find *)
+            let s = builtin sub u0x00 exception_code in
+            Pair {Uint32 Uint32} s offset
+            | Some p => match p with | Pair s _ =>
+            let next_offset = let x = builtin sub k u0xf6 in builtin add x offset in
+            Pair {Uint32 Uint32} s next_offset
             end end
           end
           end
@@ -316,7 +545,35 @@ let rlp_split : ByStr -> Uint32 -> Pair ByStr Uint32 =
     match p with
     | Pair size data_offset =>
       let res = builtin substr raw data_offset size in (* ignore `bytes` prefix and just return the data *)
-      let next_offset = builtin add size offset in
+      let next_offset = builtin add size data_offset in
+      Pair {ByStr Uint32} res next_offset
+    end
+
+(* NOTE: do NOT use `raw` with offset < returned offset as it has not been modified. *)
+let old_rlp_split : ByStr -> Uint32 -> Pair ByStr Uint32 =
+  fun (raw : ByStr) =>
+  fun (offset : Uint32) =>
+    (*
+      uint size;
+      (size,offset_) = rlpReadKind(raw,offset);
+      // [offset_,...offset_+size]
+      assembly {
+          mstore(add(raw,sub(offset_,0x20)),size)
+          // write size into the 32 bytes before the data
+          // [offset_-32,...,offset_,...,offset_+size]
+          res := add(raw,sub(offset_,0x20))
+          // return next offset starting from the size
+          // [res,...,offset_,...,offset_+size]
+          offset_ := add(offset_,size)
+          // replace offset_ to end
+          // [res,...,o,...,offset_,...]
+      }
+    *)
+    let p = old_rlp_read_kind raw offset in
+    match p with
+    | Pair size data_offset =>
+      let res = builtin substr raw data_offset size in (* ignore `bytes` prefix and just return the data *)
+      let next_offset = builtin add size data_offset in
       Pair {ByStr Uint32} res next_offset
     end
 
@@ -348,9 +605,9 @@ let rlp_get_next_bytes : ByStr -> Uint32 -> Pair ByStr Uint32 =
         }
       *)
       let data_bz = builtin substr raw data_offset size in
-      let required_size = let x = builtin add size u0x1f in let y = builtin div x u0x20 in let z = builtin add y u0x01 in builtin mul z u0x20 in
-      let data_bz_padded = pad data_bz required_size in
-      Pair {ByStr Uint32} data_bz_padded new_offset (* ignore the size prefix for `bytes` *)
+      (* let required_size = let x = builtin add size u0x1f in let y = builtin div x u0x20 in let z = builtin add y u0x01 in builtin mul z u0x20 in
+      let data_bz_padded = pad data_bz required_size in *)
+      Pair {ByStr Uint32} data_bz new_offset (* ignore the size prefix for `bytes` *)
     end
 
 let rlp_get_next_uint256 : ByStr -> Uint32 -> Pair Uint256 Uint32 =
@@ -440,9 +697,9 @@ let rlp_get_next_address : ByStr -> Uint32 -> Pair ByStr20 Uint32 =
   match p with
   | Pair size data_offset =>
     let check = builtin sub u0x14 size in
-    let bz = builtin substr raw data_offset u0x20 in
-    let bz_padded = pad bz u0x20 in
-    let m = builtin to_bystr20 bz_padded in
+    let bz = builtin substr raw data_offset u0x14 in
+    (* let bz_padded = pad bz u0x14 in *)
+    let m = builtin to_bystr20 bz in
     match m with
     | None =>
         (* ERR! just blow up here *)
@@ -510,7 +767,7 @@ let get_validators_from_header : ByStr -> List ByStr20 =
   let p5 = let o = get_data_offset p4 in rlp_read_kind rawHeader o in (* position of GasUsed *)
   let p6 = let o = get_data_offset p5 in rlp_read_kind rawHeader o in (* position of Time *)
   let extra = let o = get_data_offset p6 in let b = rlp_get_next_bytes rawHeader o in get_data b in
-  let val_bz = let b = rlp_get_next_bytes extra u0x00 in get_data b in (* ignore `bytes` prefix *)
+  let val_bz = let b = rlp_get_next_bytes extra u0x20 in get_data b in (* ignore `bytes` prefix *)
   let p = rlp_read_kind val_bz u0x00 in
   match p with
   | Pair size offset =>
@@ -529,8 +786,7 @@ let get_validators_from_header : ByStr -> List ByStr20 =
     in
     (* array is constructed by pushing to the head of list - reverse to maintain right order *)
     let array = fold fn initial count in
-    let reverse = @list_reverse ByStr20 in
-    reverse array
+    array
   end
 
 let has_enough_signers : List ByStr20 -> List ByStr20 -> Bool =
@@ -704,6 +960,11 @@ let abi_encode_bytes : ByStr -> ByStr =
     let data_bz = pad_bytes bz in
     builtin concat len_bz data_bz
 
+let abi_encode_packed : ByStr -> ByStr -> ByStr =
+  fun (first : ByStr) =>
+  fun (second : ByStr) =>
+    builtin concat first second
+
 let next_offset : Uint32 -> ByStr -> Uint32 =
   fun (current_offset : Uint32) =>
   fun (bz : ByStr) =>
@@ -796,65 +1057,377 @@ let decode_cross_tx : ByStr -> CrossTx =
     CrossTx tx_hash from_chain_id tx_param
     end end end
 
-let verify_proof : ByStr -> ByStr -> ByStr -> ByStr =
-  fun (proof : ByStr) =>
+let get_cross_tx_storage_slot : CrossTx -> ByStr =
+  fun (crossTx : CrossTx) =>
+    let bytes = let temp = 0x72657175657374 in builtin to_bystr temp in
+    match crossTx with
+    | CrossTx txHash fromChainId txParams =>
+      match txParams with
+      | TxParam sourceChainTxHash crossChainId fromContract toChainId toContract method args =>
+        let encodePacked = let toChainIdByStr8 = builtin to_bystr8 toChainId in
+                           let toChainIdBytes = builtin to_bystr toChainIdByStr8 in
+                           let toChainIdBytesPadded = right_pad toChainIdBytes u0x08 in
+                           let toChaindIdBytesRev = builtin strrev toChainIdBytesPadded in
+                           let first = abi_encode_packed bytes toChaindIdBytesRev in abi_encode_packed first txHash in
+        let keccak = builtin keccak256hash encodePacked in
+        builtin to_bystr keccak
+      end
+    end
+
+let left_pad_zero : ByStr -> ByStr =
+  fun (bytes: ByStr) =>
+    let len = builtin strlen bytes in
+    let fold = @nat_fold ByStr in
+    let fn = fun (cur : ByStr) => fun (num : Nat) =>
+      let i = nat_to_int num in
+      let idx = let temp = builtin sub len u0x01 in builtin sub temp i in
+      let paddedBytes = builtin substr cur u0x00 idx in
+      let maybeByteToPad = let fixedByte = builtin substr cur idx u0x01 in builtin to_bystr1 fixedByte in
+      match maybeByteToPad with
+      | None =>
+        (* throw error *)
+        builtin concat padding bytes
+      | Some byteToPad =>
+        let int = builtin to_uint32 byteToPad in
+        let firstHalfByte = builtin div int u0x10 in
+        let secondHalfByte = builtin rem int u0x10 in
+        let paddedByte4 = let temp = builtin mul firstHalfByte u0x10 in
+                          let paddedFirstHalf = builtin mul temp u0x10 in
+                          let paddedSecondHalf = builtin add paddedFirstHalf secondHalfByte in builtin to_bystr4 paddedSecondHalf in
+        let paddedByte2 = let paddedByteX = builtin to_bystr paddedByte4 in builtin substr paddedByteX u0x02 u0x02 in
+        builtin concat cur paddedByte2
+      end
+    in
+    let count = builtin to_nat len in
+    let temp = fold fn bytes count in
+    let paddedLen = builtin mul len u0x02 in
+    builtin substr temp len paddedLen
+    
+let bytes_to_hex : ByStr -> ByStr = 
+  fun (keyBytes: ByStr) =>
+    let paddedString = left_pad_zero keyBytes in
+    builtin concat paddedString ten_padding
+
+let old_check_node_hash : ByStr -> Uint32 -> ByStr -> Bool =
+  fun (raw: ByStr) =>
+  fun (offset: Uint32) =>
+  fun (hash: ByStr) =>
+    let p = old_rlp_read_kind raw offset in
+    let size = get_size p in
+    let offset_ = get_offset p in
+    let offsetDiff = builtin sub offset_ offset in
+    let fullSize = builtin add size offsetDiff in
+    let lt_0x20 = builtin lt fullSize u0x20 in
+    match lt_0x20 with
+    | True =>
+      let subHash = builtin substr hash u0x00 fullSize in
+      let subRaw = builtin substr raw u0x00 fullSize in
+      let isEqual = builtin eq subHash subRaw in
+      match isEqual with
+      | True =>
+        let hashLen = builtin strlen hash in
+        let isHashSameSize = builtin eq hashLen fullSize in
+        match isHashSameSize with
+        | True => True
+        | False => False
+        end
+      | False => False
+      end
+      | False =>
+      let hashedSum = let substrHashedSum = builtin substr raw offset fullSize in builtin keccak256hash substrHashedSum in
+      let paddedHash = pad hash u0x20 in
+      let paddedHash20 = builtin to_bystr32 paddedHash in
+      match paddedHash20 with
+      | None =>
+        (* ERR! just blow up here *)
+        False
+      | Some paddedHash20Fixed =>
+        builtin eq hashedSum paddedHash20Fixed
+      end
+    end
+
+let check_node_hash : ByStr -> Uint32 -> ByStr -> Bool =
+  fun (raw: ByStr) =>
+  fun (offset: Uint32) =>
+  fun (hash: ByStr) =>
+    let p = rlp_read_kind raw offset in
+    let size = get_size p in
+    let offset_ = get_offset p in
+    let offsetDiff = builtin sub offset_ offset in
+    let fullSize = builtin add size offsetDiff in
+    let lt_0x20 = builtin lt fullSize u0x20 in
+    match lt_0x20 with
+    | True =>
+      let subHash = builtin substr hash u0x00 fullSize in
+      let subRaw = builtin substr raw u0x00 fullSize in
+      let isEqual = builtin eq subHash subRaw in
+      match isEqual with
+      | True =>
+        let hashLen = builtin strlen hash in
+        let isHashSameSize = builtin eq hashLen fullSize in
+        match isHashSameSize with
+        | True => True
+        | False => False
+        end
+      | False => False
+      end
+    | False =>
+      let hashedSum = let substrHashedSum = builtin substr raw offset fullSize in builtin keccak256hash substrHashedSum in
+      let paddedHash = pad hash u0x20 in
+      let paddedHash20 = builtin to_bystr32 paddedHash in
+      match paddedHash20 with
+      | None =>
+        (* ERR! just blow up here *)
+        False
+      | Some paddedHash20Fixed =>
+        builtin eq hashedSum paddedHash20Fixed
+      end
+    end
+
+let compact_to_hex : ByStr -> ByStr = 
+  fun (keyCompact : ByStr) =>
+    let t = builtin substr keyCompact u0x00 u0x01 in
+    let maybeTByStr1 = builtin to_bystr1 t in
+    match maybeTByStr1 with
+    | None =>
+      (* throw error *)
+      t
+    | Some tByStr1 =>
+      let tShifted = let tInt = builtin to_uint32 tByStr1 in builtin div tInt u0x10 in
+      let compactLen = builtin strlen keyCompact in
+      let isOddValue = builtin rem tShifted u0x02 in
+      let isOdd = builtin eq isOddValue u0x01 in
+      let hasTermValue = builtin div tShifted u0x02 in
+      let hasTerm = builtin eq hasTermValue u0x01 in
+      let hexLen = let firstMul = builtin mul compactLen u0x02 in
+                         let firstSub = builtin sub firstMul u0x02 in
+                         let firstAdd = builtin add firstSub hasTermValue in builtin add firstAdd isOddValue in
+      let bytesToPad = let len = builtin sub compactLen u0x01 in builtin substr keyCompact u0x01 len in
+      let paddedBytes = left_pad_zero bytesToPad in
+      match isOdd with
+      | True =>
+        let paddedHalfByte = let tInt = builtin to_uint32 tByStr1 in 
+                             let secondHalfOfT = builtin rem tInt u0x10 in
+                             let paddedHalfByte4 = builtin to_bystr4 secondHalfOfT in
+                             let paddedHalfByteX = builtin to_bystr paddedHalfByte4 in builtin substr paddedHalfByteX u0x03 u0x01 in
+        let isOddBytes = builtin concat paddedHalfByte paddedBytes in
+        match hasTerm with
+        | True =>
+          let temp = builtin concat isOddBytes ten_padding in
+          right_pad temp hexLen
+        | False =>
+          right_pad isOddBytes hexLen
+        end
+      | False =>
+        match hasTerm with
+        | True =>
+          let temp = builtin concat paddedBytes ten_padding in
+          right_pad temp hexLen
+        | False =>
+          right_pad paddedBytes hexLen
+        end
+      end
+    end
+  
+let compare_key : ByStr -> ByStr -> Pair ByStr Bool =
   fun (key : ByStr) =>
-  fun (root : ByStr) =>
-    padding (* TODO *)
-  (*
+  fun (element : ByStr) =>
+    let keyLen = builtin strlen key in
+    let elementLen = builtin strlen element in
+    let keyLenLtElementLen = builtin lt keyLen elementLen in
+    match keyLenLtElementLen with
+    | True =>
+        Pair {ByStr Bool} key false
+    | False =>
+      let slotCnt = builtin div elementLen u0x20 in
+      let remainder = builtin rem elementLen u0x20 in
+      let init = True in
+      let count = builtin to_nat slotCnt in
+      let fold = @nat_fold Bool in
+      let fn = fun (cur : Bool) => fun (num : Nat) =>
+        let i = nat_to_int num in
+        let offset = builtin mul i u0x20 in
+        let isLastLoop = builtin eq i slotCnt in
+        match isLastLoop with
+        | True =>
+          let elementExtract = builtin substr element offset remainder in
+          let keyExtract = builtin substr key offset remainder in
+          builtin eq elementExtract keyExtract
+        | False =>
+          let elementExtract = builtin substr element offset u0x20 in
+          let keyExtract = builtin substr key offset u0x20 in
+          builtin eq elementExtract keyExtract
+        end
+      in
+      let forLoopIsIn = fold fn init count in
+      let offset = builtin mul slotCnt u0x20 in
+      match forLoopIsIn with
+      | True =>
+        let remainder = builtin rem elementLen u0x20 in
+        let elementExtract = builtin substr element offset remainder in
+        let keyExtract = builtin substr key offset remainder in
+        let isEqual = builtin eq elementExtract keyExtract in
+        match isEqual with
+        | True =>
+          let idx = builtin add offset remainder in
+          let remainingKeyLen = builtin sub keyLen idx in
+          let keySlice = builtin substr key idx remainingKeyLen in
+          Pair {ByStr Bool} keySlice true
+        | False =>
+          Pair {ByStr Bool} key false
+        end
+      | False =>
+        Pair {ByStr Bool} key false
+      end
+    end
 
-      // no copy , parse proof in-place , so if _proof is needed after , back up it.
-      // for proof like: rlp([rlp(node1),rlp(node2),...,rlp(nodeN)])
-      function verifyProof(bytes memory _proof, bytes memory _key, bytes memory _root) internal pure returns(bytes memory value) {
-          _key = bytesToHex(_key);
-          (_proof,) = rlpSplit(_proof,0x20); // get *[rlp(node1),rlp(node2),...,rlp(nodeN)]*
-          uint offset = 0x20;
-          uint size = _proof.length;
-          value = _root; // *value* = *_root* ( which equal *hash(rlp(node1))* )
+let take_one_byte : ByStr -> Pair ByStr Uint32 =
+  fun (initBuf : ByStr) =>
+    let len = builtin strlen initBuf in
+    let lenRequired = builtin sub len u0x01 in
+    let buf = builtin substr initBuf u0x01 lenRequired in
+    let index = builtin substr initBuf u0x00 u0x01 in
+    let maybeBufByStr1 = builtin to_bystr1 index in
+    match maybeBufByStr1 with
+    | None =>
+      (* throw error *)
+      let errorCode = Uint32 1007 in
+      Pair {ByStr Uint32} initBuf errorCode
+    | Some bufByStr1 =>
+      let index = builtin to_uint32 bufByStr1 in
+      Pair {ByStr Uint32} buf index
+    end
 
-          for (;offset<size+0x20;) {
-              bytes memory node; // memory for *nodeI*
-              require(checkNodeHash(_proof,offset,value),"proof:unequal node hash"); // compare *nodeI-1.value* and *hash(rlp(nodeI))*
-              (node,offset) = rlpSplit(_proof,offset); // get *nodeI*; _proof now: *[rlp(nodeI+1),rlp(nodeI+2),...,rlp(nodeN)]*
+let verify_proof : ByStr -> ByStr -> ByStr -> Pair ByStr Bool =
+    fun (initProof : ByStr) =>
+    fun (initKey : ByStr) =>
+    fun (initRoot : ByStr) =>
+      let key = bytes_to_hex initKey in
+      let proofSplit = old_rlp_split initProof u0x00 in
+      let proof = get_data proofSplit in
+      let value = initRoot in
+      let initOffset = u0x00 in
+      let initKeyOffsetValue = KeyOffsetValue key initOffset value in
+      let size = builtin strlen proof in
+      let fold = @nat_fold_while KeyOffsetValue in
+      let fn = fun (cur : KeyOffsetValue) => fun (num : Nat) =>
+        let i = nat_to_int num in
+        let isFirstLoop = builtin eq u0x20 i in
+        let currentValue = get_value cur in
+        let currentKey = get_key cur in
+        let currentOffset = get_key_offset cur in
+        let isOffsetLt = builtin lt currentOffset size in
+        match isOffsetLt with
+        | False => None {KeyOffsetValue}
+        | True =>
+          let isEqualNodeHash = match isFirstLoop with
+          | True => old_check_node_hash proof currentOffset currentValue
+          | False => check_node_hash proof currentOffset currentValue
+          end
+          in
+          match isEqualNodeHash with
+          | False => 
+            (*throw error invalid node hash*)
+            let exception_code = Uint32 1008 in
+            let err = builtin sub u0x00 exception_code in
+            None {KeyOffsetValue}
+          | True =>
+            let split = match isFirstLoop with
+            | True =>
+              old_rlp_split proof currentOffset
+            | False =>
+              rlp_split proof currentOffset
+            end
+            in
+            let node = get_data split in
+            let newOffset = get_split_offset split in
+            let tmpReadKind = rlp_read_kind node u0x00 in
+            let sizeTmp = get_size tmpReadKind in
+            let offsetTmp = get_offset tmpReadKind in
+            let tmpReadKind2 = let sum = builtin add sizeTmp offsetTmp in rlp_read_kind node sum in
+            let sizeTmp2 = get_size tmpReadKind2 in
+            let offsetTmp2 = get_offset tmpReadKind2 in
+            let newOffsetTmp = builtin add offsetTmp2 sizeTmp2 in
+            let isNewOffsetTmpEqual = let nodeLength = builtin strlen node in builtin eq newOffsetTmp nodeLength in
+            match isNewOffsetTmpEqual with
+            | True =>
+              let trueSplit = rlp_split node u0x00 in
+              let keyElement = get_data trueSplit in
+              let offset = get_split_offset trueSplit in
+              let subKey = compact_to_hex keyElement in
+              let compareKey = compare_key currentKey subKey in
+              let isIn = get_is_in compareKey in
+              match isIn with
+              | False =>
+                (* throw error here failed CompareKey check*)
+                let exception_code = Uint32 1009 in
+                let err = builtin sub u0x00 exception_code in
+                None {KeyOffsetValue}
+              | True => 
+                let newKey = get_key_slice compareKey in
+                let newSplit = rlp_split node offset in
+                let newValue = get_data newSplit in
+                let newKeyOffsetValue = KeyOffsetValue newKey newOffset newValue in
+                Some {KeyOffsetValue} newKeyOffsetValue
+              end
+            | False => 
+              let currentKeyLength = builtin strlen currentKey in
+              let isCurrentKeyLengthZero = builtin eq currentKeyLength u0x00 in
+              match isCurrentKeyLengthZero with
+              | True =>
+                let newKeyOffsetValue = KeyOffsetValue currentKey newOffset currentValue in
+                Some {KeyOffsetValue} newKeyOffsetValue
+              | False =>
+                let takeOneByte = take_one_byte currentKey in
+                let newKey = get_buffer takeOneByte in
+                let index = get_index takeOneByte in
+                let currentOffset_ = u0x00 in
+                let init = currentOffset_ in
+                let innerFold = @nat_fold_while Uint32 in
+                let innerFn = fun (cur : Uint32) => fun (num : Nat) =>
+                  let reverse = nat_to_int num in
+                  let i = builtin sub u0x11 reverse in
+                  let isIndexEqual = builtin eq index i in
+                  match isIndexEqual with
+                  | True =>
+                    None {Uint32}
+                  | False =>
+                    let currentReadKind = rlp_read_kind node cur in
+                    let currentSizeTmp = get_size currentReadKind in
+                    let currentOffsetTmp = get_offset currentReadKind in
+                    let newOffset_ = builtin add currentSizeTmp currentOffsetTmp in
+                    Some {Uint32} newOffset_
+                  end
+                in
+                let innerCount = builtin to_nat u0x11 in
+                let finalOffset_ = innerFold innerFn init innerCount in
+                let finalSplit = rlp_split node finalOffset_ in
+                let newValue = get_data finalSplit in
+                let newKeyOffsetValue = KeyOffsetValue newKey newOffset newValue in
+                Some {KeyOffsetValue} newKeyOffsetValue
+              end
+            end
+          end
+        end
+      in
+      let maxCount = builtin to_nat u0x20 in
+      let keyOffsetValue = fold fn initKeyOffsetValue maxCount in
+      let finalValue = get_value keyOffsetValue in
+      let finalKey = get_key keyOffsetValue in
+      let finalOffset = get_key_offset keyOffsetValue in
+      let finalKeyLength = builtin strlen finalKey in
+      let isFinalKeyLengthZero = builtin eq finalKeyLength u0x00 in
+      match isFinalKeyLengthZero with
+      | True =>
+        Pair {ByStr Bool} finalValue true
+      | False =>
+        Pair {ByStr Bool} finalValue false
+      end
 
-              (uint size_tmp,uint offset_tmp) = rlpReadKind(node,0x20);
-              (size_tmp,offset_tmp) = rlpReadKind(node,offset_tmp+size_tmp);
-              offset_tmp += size_tmp; // length of first two node elements
-              if (offset_tmp==node.length+0x20) { // shortNode = [rlp(key),rlp(value)]
-                  (bytes memory keyElement,uint _offset) = rlpSplit(node,0x20);
-                  bool isIn;
-                  bytes memory subKey = compactToHex(keyElement);
-                  (_key,isIn) = compareKey(_key, subKey);
-                  require(isIn,"proof:invalid key");
-                  (value,) = rlpSplit(node,_offset);
-              } else { // fullNode = [hash(child[0]),hash(child[1]),...,hash(child[15]),emptyKeyValue]
-                  uint index;
-                  if (_key.length==0) {
-                      index = 17;
-                  } else {
-                      (_key,index) = takeOneByte(_key);
-                  }
-                  uint _offset = 0x20;
-                  for (uint i=0;i<17;i++) {
-                      if (index==i) {
-                          (value,) = rlpSplit(node,_offset);
-                          break;
-                      } else {
-                          (size_tmp,offset_tmp) = rlpReadKind(node,_offset);
-                          _offset = offset_tmp + size_tmp;
-                      }
-                  }
-              }
-          }
-
-          require(_key.length==0,"proof:invalid key");
-      }
-  *)
-
-let verify_account_proof : ByStr -> ByStr -> ByStr -> ByStr -> ByStr -> ByStr =
+let verify_account_proof : ByStr -> ByStr -> ByStr20 -> ByStr -> ByStr -> ByStr =
   fun (accountProof : ByStr) =>
   fun (headerRoot : ByStr) =>
-  fun (address : ByStr) =>
+  fun (address : ByStr20) =>
   fun (storageProof : ByStr) =>
   fun (storageIndex : ByStr) =>
     (*
@@ -902,7 +1475,8 @@ let verify_account_proof : ByStr -> ByStr -> ByStr -> ByStr -> ByStr -> ByStr =
     *)
     let account_hash = builtin keccak256hash address in
     let account_key = builtin to_bystr account_hash in
-    let account = verify_proof accountProof account_key headerRoot in
+    let verifyAccountProofPair = verify_proof accountProof account_key headerRoot in
+    let account = get_verify_proof_value verifyAccountProofPair in
     let get_offset_ = @snd ByStr Uint32 in
     let p1 = rlp_split account u0x00 in
     let d1 = get_data p1 in
@@ -914,7 +1488,8 @@ let verify_account_proof : ByStr -> ByStr -> ByStr -> ByStr -> ByStr -> ByStr =
     let storageRoot = get_data p4 in
     let storage_hash = builtin keccak256hash storageIndex in
     let storage_key = builtin to_bystr storage_hash in
-    let value = verify_proof storageProof storage_key storageRoot in
+    let verifyStorageProofPair = verify_proof storageProof storage_key storageRoot in
+    let value = get_verify_proof_value verifyStorageProofPair in
     let r = rlp_split value u0x00 in (* ignore `bytes` prefix *)
     get_data r
 
@@ -1153,6 +1728,7 @@ transition VerifyHeaderAndExecuteTx(
   header = decode_header rawHeader;
   cross_tx = decode_cross_tx rawCrossTx;
   number = get_number header;
+  root = get_root header;
 
   (* verify block.height *)
   cur_epoch_start_height <- & eccd.cur_epoch_start_height;
@@ -1182,6 +1758,24 @@ transition VerifyHeaderAndExecuteTx(
     require(ECCUtils.bytesToBytes32(storageValue) == keccak256(rawCrossTx), "Verify proof failed");
   *)
 
+  storage_index = get_cross_tx_storage_slot cross_tx;
+  storage_value = verify_account_proof accountProof root zion_ccm_address storageProof storage_index;
+  keccakCrossTx = builtin keccak256hash rawCrossTx;
+  maybe_storage_value_bystr32 = builtin to_bystr32 storage_value;
+  match maybe_storage_value_bystr32 with
+  | Some storage_value_bystr32 =>
+    isEqual = builtin eq keccakCrossTx storage_value_bystr32;
+    match isEqual with
+    | True =>
+    | False =>
+      err = CodeVerifyProofFailed;
+      ThrowError err
+    end
+  | None =>
+    err = CodeVerifyProofFailed;
+    ThrowError err
+  end;
+
   match cross_tx with
   | CrossTx tx_hash from_chain_id tx_param =>
     (* check & put tx exection information *)
@@ -1194,42 +1788,47 @@ transition VerifyHeaderAndExecuteTx(
       | Some _ =>
         err = CodeTxAlreadyExecuted;
         ThrowError err
+      end;
+      match tx_param with
+      | TxParam from_tx_hash cross_chain_id from_contract to_chain_id to_contract method args =>
+        is_right_chain = builtin eq zilliqa_chain_id to_chain_id;
+        match is_right_chain with
+        | True => (* ok *)
+        | False =>
+          err = CodeInvalidToChainID;
+          ThrowError err
+        end;
+
+        maybe_from_tx_hash_fixed = builtin to_bystr32 from_tx_hash;
+
+        match maybe_from_tx_hash_fixed with
+        | None =>
+          err = CodeInvalidToChainID;
+          ThrowError err
+        | Some from_tx_hash_fixed =>
+          msg_to_eccd =  {
+            _tag : "MarkTxExecuted"; _recipient: eccd; _amount: zero_amt;
+            from_chain_id: from_chain_id; from_tx_hash: tx_hash_fixed
+          };
+          msgs = one_msg msg_to_eccd;
+          send msgs
+        end;
+
+        ExecuteCrossChainTx to_contract method args from_contract from_chain_id;
+
+        (* retain v1 events *)
+        e = {
+          _eventname: "VerifyHeaderAndExecuteTxEvent";
+          fromChainId : from_chain_id;
+          toContractAddr : to_contract;
+          crossChainTxHash : tx_hash;
+          fromChainTxHash : from_tx_hash
+        };
+        event e
       end
     | None =>
       err = CodeInvalidTxHash;
       ThrowError err
-    end;
-
-    match tx_param with
-    | TxParam from_tx_hash cross_chain_id from_contract to_chain_id to_contract method args =>
-      is_right_chain = builtin eq zilliqa_chain_id to_chain_id;
-      match is_right_chain with
-      | True => (* ok *)
-      | False =>
-        err = CodeInvalidToChainID;
-        ThrowError err
-      end;
-
-      from_tx_hash_fixed = builtin to_bystr32 from_tx_hash;
-
-      msg_to_eccd =  {
-        _tag : "MarkTxExecuted"; _recipient: eccd; _amount: zero_amt;
-        from_chain_id: from_chain_id; from_tx_hash: from_tx_hash_fixed
-      };
-      msgs = one_msg msg_to_eccd;
-      send msgs;
-
-      ExecuteCrossChainTx to_contract method args from_contract from_chain_id;
-
-      (* retain v1 events *)
-      e = {
-        _eventname: "VerifyHeaderAndExecuteTxEvent";
-        fromChainId : from_chain_id;
-        toContractAddr : to_contract;
-        crossChainTxHash : tx_hash;
-        fromChainTxHash : from_tx_hash
-      };
-      event e
     end
   end
 end
