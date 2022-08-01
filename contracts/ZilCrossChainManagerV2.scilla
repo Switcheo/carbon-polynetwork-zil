@@ -1086,6 +1086,8 @@ let left_pad_zero : ByStr -> ByStr =
       match maybeByteToPad with
       | None =>
         (* throw error *)
+        let errorCode = Uint32 1010 in
+        let err = builtin sub u0x00 errorCode in
         builtin concat padding bytes
       | Some byteToPad =>
         let int = builtin to_uint32 byteToPad in
@@ -1191,6 +1193,8 @@ let compact_to_hex : ByStr -> ByStr =
     match maybeTByStr1 with
     | None =>
       (* throw error *)
+      let errorCode = Uint32 1011 in
+      let err = builtin sub u0x00 errorCode in
       t
     | Some tByStr1 =>
       let tShifted = let tInt = builtin to_uint32 tByStr1 in builtin div tInt u0x10 in
@@ -1292,6 +1296,7 @@ let take_one_byte : ByStr -> Pair ByStr Uint32 =
     | None =>
       (* throw error *)
       let errorCode = Uint32 1007 in
+      let err = builtin sub u0x00 errorCode in
       Pair {ByStr Uint32} initBuf errorCode
     | Some bufByStr1 =>
       let index = builtin to_uint32 bufByStr1 in
