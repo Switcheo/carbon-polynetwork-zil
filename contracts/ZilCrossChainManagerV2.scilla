@@ -50,11 +50,13 @@ let u0x17 = Uint32 23
 let u0x1f = Uint32 31
 let u0x20 = Uint32 32
 let u0x40 = Uint32 64
+let u0x7e = Uint32 126
 let u0x80 = Uint32 128
 let u0xb6 = Uint32 182
 let u0xb7 = Uint32 183
 let u0xb8 = Uint32 184
 let u0xba = Uint32 186
+let u0xbe = Uint32 190
 let u0xc0 = Uint32 192
 let u0xd5 = Uint32 213
 let u0xd6 = Uint32 214
@@ -264,262 +266,136 @@ let pad_bytes: ByStr -> ByStr =
     fold fn bz count
 
 let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
-    fun (raw : ByStr) =>
-    fun (offset : Uint32) =>
-      (*
-        assembly {
-            k := shr(0xf8,mload(add(raw,offset)))
-            // shift word at position offset in raw by 0xf8 (248 bits)
-            // => i.e. remove last 248 bits and read the first 256-248 = 8 bits = 1 byte
-        }
-      *)
-      let res = extract_bystr1 raw offset in
-      match res with
-      | None =>
-        (* ERR! just blow up here *)
-        let exception_code = Uint32 1001 in (* make this err easy to find *)
-        let size = builtin sub u0x00 exception_code in
-        Pair {Uint32 Uint32} size offset
-      | Some pair =>
-        match pair with
-        | Pair k_bystr _ =>
-          let k = builtin to_uint32 k_bystr in
-          let lt_0x80 = builtin lt k u0x80 in
-          let lt_0xb7 = builtin lt k u0xb7 in
-          let lt_0xc0 = builtin lt k u0xc0 in
-          let lt_0xf7 = builtin lt k u0xf7 in
-          match lt_0x80 with | True =>
-          (*
-            if (k<0x80) {
-                assembly {
-                    size := 1
-                    offset_ := offset
-                }
-                return (size,offset_);
-            }
-          *)
-            let size = u0x01 in
-            Pair {Uint32 Uint32} size offset | False =>
-          match lt_0xb7 with | True =>
-            (*
-              if (k<0xb7) {
-                  assembly {
-                      size := sub(k,0x80)
-                      offset_ := add(offset,1)
-                  }
-                  return (size,offset_);
-              }
-            *)
-            let size = builtin sub k u0x80 in
-            let next_offset = builtin add offset u0x01 in
-            Pair {Uint32 Uint32} size next_offset | False =>
-          match lt_0xc0 with | True =>
-            (*
-              if (k<0xc0) {
-                  assembly {
-                      size := shr(mul(8,sub(0xd7,k)),mload(add(add(raw,offset),0x01)))
-                      // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
-                      // shift is 8*(0xd7 - k) => this determines how many bytes to read in for the size
-                      // => this can be from 23 to 32 bytes
-                      // so we just need to cut the raw bystr from (offset + 1) to (0xd7 - k) and convert it to a uint32
-                      offset_ := add(offset,sub(k,0xb6))
-                      // next offset is offset + (k - 0xb6)
-                  }
-                  return (size,offset_);
-              }
-            *)
-            let idx = builtin add offset u0x01 in
-            let len = builtin sub u0xd5 k in (* we don't have to multiply by 8 here, as len is in bytes *)
-            let size_bz = builtin substr raw idx len in
-            let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
-            let size = extract_uint32 big_endian size_bz_padded u0x00 in
-            match size with
-            | None =>
-              (* ERR! just blow up here *)
-              let exception_code = Uint32 1002 in (* make this err easy to find *)
-              let s = builtin sub u0x00 exception_code in
-              Pair {Uint32 Uint32} s offset
-            | Some p => match p with | Pair s _ =>
-              let next_offset = let x = builtin sub k u0xb6 in builtin add x offset in
-              Pair {Uint32 Uint32} s next_offset
-            end end | False =>
-          match lt_0xf7 with | True =>
-            (*
-              if (k<0xf7) {
-                  assembly {
-                      size := sub(k,0xc0)
-                      offset_ := add(offset,1)
-                  }
-                  return (size,offset_);
-              }
-            *)
-            let size = builtin sub k u0xc0 in
-            let next_offset = builtin add offset u0x01 in
-            Pair {Uint32 Uint32} size next_offset
-          | False =>
-            (*
-              {
-                  assembly {
-                      size := shr(mul(8,sub(0x117,k)),mload(add(add(raw,offset),0x01)))
-                      // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
-                      // shift is 8*(0x117 - k) => this determines how many bytes to read in for the size
-                      // => this can be from 14 to 31 bytes
-                      // so we just need to cut the bystr from (offset + 1) to (0x117 - k) and convert it to a uint32
-                      offset_ := add(offset,sub(k,0xf6))
-                      // next offset is offset + (k - 0xf6)
-                  }
-              }
-            *)
-            let idx = builtin add offset u0x01 in
-            let len = builtin sub u0x115 k in (* we don't have to multiply by 8 here, as len is in bytes *)
-            let size_bz = builtin substr raw idx len in
-            let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
-            let size = extract_uint32 big_endian size_bz_padded u0x00 in
-            match size with
-            | None =>
-              (* ERR! just blow up here *)
-              let exception_code = Uint32 1003 in (* make this err easy to find *)
-              let s = builtin sub u0x00 exception_code in
-              Pair {Uint32 Uint32} s offset
-            | Some p => match p with | Pair s _ =>
-              let next_offset = let x = builtin sub k u0xf6 in builtin add x offset in
-              Pair {Uint32 Uint32} s next_offset
-            end end
-          end
-          end
-          end
-          end
-        end
-      end
-
-let old_rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
-    fun (raw : ByStr) =>
-    fun (offset : Uint32) =>
-      (*
-        assembly {
-            k := shr(0xf8,mload(add(raw,offset)))
-            // shift word at position offset in raw by 0xf8 (248 bits)
-            // => i.e. remove last 248 bits and read the first 256-248 = 8 bits = 1 byte
-        }
-      *)
-      let res = extract_bystr1 raw offset in
-      match res with
-      | None =>
-        (* ERR! just blow up here *)
-        let exception_code = Uint32 1001 in (* make this err easy to find *)
-        let size = builtin sub u0x00 exception_code in
-        Pair {Uint32 Uint32} size offset
-      | Some pair =>
-        match pair with
-        | Pair k_bystr _ =>
-          let k = builtin to_uint32 k_bystr in
-          let lt_0x80 = builtin lt k u0x80 in
-          let lt_0xb7 = builtin lt k u0xb7 in
-          let lt_0xc0 = builtin lt k u0xc0 in
-          let lt_0xf7 = builtin lt k u0xf7 in
-          match lt_0x80 with | True =>
-          (*
-            if (k<0x80) {
+  fun (raw : ByStr) =>
+  fun (offset : Uint32) =>
+    (*
+      assembly {
+          k := shr(0xf8,mload(add(raw,offset)))
+          // shift word at position offset in raw by 0xf8 (248 bits)
+          // => i.e. remove last 248 bits and read the first 256-248 = 8 bits = 1 byte
+      }
+    *)
+    let res = extract_bystr1 raw offset in
+    match res with
+    | None =>
+      (* ERR! just blow up here *)
+      let exception_code = Uint32 1001 in (* make this err easy to find *)
+      let size = builtin sub u0x00 exception_code in
+      Pair {Uint32 Uint32} size offset
+    | Some pair =>
+      match pair with
+      | Pair k_bystr _ =>
+        let k = builtin to_uint32 k_bystr in
+        let lt_0x80 = builtin lt k u0x80 in
+        let lt_0xb7 = builtin lt k u0xb7 in
+        let lt_0xc0 = builtin lt k u0xc0 in
+        let lt_0xf7 = builtin lt k u0xf7 in
+        match lt_0x80 with | True =>
+        (*
+          if (k<0x80) {
               assembly {
                   size := 1
                   offset_ := offset
               }
               return (size,offset_);
-            }
-          *)
-            let size = u0x01 in
-            Pair {Uint32 Uint32} size offset | False =>
-          match lt_0xb7 with | True =>
-            (*
+          }
+        *)
+          let size = u0x01 in
+          Pair {Uint32 Uint32} size offset | False =>
+        match lt_0xb7 with | True =>
+          (*
             if (k<0xb7) {
                 assembly {
-                  size := sub(k,0x80)
-                  offset_ := add(offset,1)
+                    size := sub(k,0x80)
+                    offset_ := add(offset,1)
                 }
                 return (size,offset_);
             }
-            *)
-            let size = builtin sub k u0x80 in
-            let next_offset = builtin add offset u0x01 in
-            Pair {Uint32 Uint32} size next_offset | False =>
-          match lt_0xc0 with | True =>
-            (*
+          *)
+          let size = builtin sub k u0x80 in
+          let next_offset = builtin add offset u0x01 in
+          Pair {Uint32 Uint32} size next_offset | False =>
+        match lt_0xc0 with | True =>
+          (*
             if (k<0xc0) {
                 assembly {
-                  size := shr(mul(8,sub(0xd7,k)),mload(add(add(raw,offset),0x01)))
-                  // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
-                  // shift is 8*(0xd7 - k) => this determines how many bytes to read in for the size
-                  // => this can be from 23 to 32 bytes
-                  // so we just need to cut the raw bystr from (offset + 1) to (0xd7 - k) and convert it to a uint32
-                  offset_ := add(offset,sub(k,0xb6))
-                  // next offset is offset + (k - 0xb6)
+                    size := shr(mul(8,sub(0xd7,k)),mload(add(add(raw,offset),0x01)))
+                    // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
+                    // shift is 8*(0xd7 - k) => this determines how many bytes to read in for the size
+                    // => this can be from 23 to 32 bytes
+                    // so we just need to cut the raw bystr from (offset + 1) to (0xd7 - k) and convert it to a uint32
+                    offset_ := add(offset,sub(k,0xb6))
+                    // next offset is offset + (k - 0xb6)
                 }
                 return (size,offset_);
             }
-            *)
-            let idx = builtin add offset u0x01 in
-            let len = builtin sub u0xd7 k in (* we don't have to multiply by 8 here, as len is in bytes *)
-            let size_bz = builtin substr raw idx len in
-            let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
-            let size = extract_uint32 big_endian size_bz_padded u0x00 in
-            match size with
-            | None =>
+          *)
+          let idx = builtin add offset u0x01 in
+          let len = let temp = builtin sub u0xd7 k in builtin sub u0x20 temp in (* we don't have to multiply by 8 here, as len is in bytes *)
+          let size_bz = builtin substr raw idx len in
+          let size_bz_padded = pad size_bz u0x04 in
+          let maybe_size_bz_4 = builtin to_bystr4 size_bz_padded in (* must be 32 bytes long for proper extraction *)
+          match maybe_size_bz_4 with
+          | None =>
             (* ERR! just blow up here *)
             let exception_code = Uint32 1002 in (* make this err easy to find *)
             let s = builtin sub u0x00 exception_code in
             Pair {Uint32 Uint32} s offset
-            | Some p => match p with | Pair s _ =>
+          | Some size_bz_4 =>
+            let size = builtin to_uint32 size_bz_4 in
             let next_offset = let x = builtin sub k u0xb6 in builtin add x offset in
-            Pair {Uint32 Uint32} s next_offset
-            end end | False =>
-          match lt_0xf7 with | True =>
-            (*
+            Pair {Uint32 Uint32} size next_offset
+          end
+          | False =>
+        match lt_0xf7 with | True =>
+          (*
             if (k<0xf7) {
                 assembly {
-                  size := sub(k,0xc0)
-                  offset_ := add(offset,1)
+                    size := sub(k,0xc0)
+                    offset_ := add(offset,1)
                 }
                 return (size,offset_);
             }
-            *)
-            let size = builtin sub k u0xc0 in
-            let next_offset = builtin add offset u0x01 in
-            Pair {Uint32 Uint32} size next_offset
-          | False =>
-            (*
+          *)
+          let size = builtin sub k u0xc0 in
+          let next_offset = builtin add offset u0x01 in
+          Pair {Uint32 Uint32} size next_offset
+        | False =>
+          (*
             {
                 assembly {
-                  size := shr(mul(8,sub(0x117,k)),mload(add(add(raw,offset),0x01)))
-                  // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
-                  // shift is 8*(0x117 - k) => this determines how many bytes to read in for the size
-                  // => this can be from 14 to 31 bytes
-                  // so we just need to cut the bystr from (offset + 1) to (0x117 - k) and convert it to a uint32
-                  offset_ := add(offset,sub(k,0xf6))
-                  // next offset is offset + (k - 0xf6)
+                    size := shr(mul(8,sub(0x117,k)),mload(add(add(raw,offset),0x01)))
+                    // the value is at raw + offset + 1. note shr is in bits but mload is in bytes
+                    // shift is 8*(0x117 - k) => this determines how many bytes to read in for the size
+                    // => this can be from 14 to 31 bytes
+                    // so we just need to cut the bystr from (offset + 1) to (0x117 - k) and convert it to a uint32
+                    offset_ := add(offset,sub(k,0xf6))
+                    // next offset is offset + (k - 0xf6)
                 }
             }
-            *)
-            let idx = builtin add offset u0x01 in
-            let len = builtin sub u0x117 k in (* we don't have to multiply by 8 here, as len is in bytes *)
-            let size_bz = builtin substr raw idx len in
-            let size_bz_padded = pad size_bz u0x20 in (* must be 32 bytes long for proper extraction *)
-            let size = extract_uint32 big_endian size_bz_padded u0x00 in
-            match size with
-            | None =>
+          *)
+          let idx = builtin add offset u0x01 in
+          let len = let temp = builtin sub u0x117 k in builtin sub u0x20 temp in (* we don't have to multiply by 8 here, as len is in bytes *)
+          let size_bz = builtin substr raw idx len in
+          let size_bz_padded = pad size_bz u0x04 in
+          let maybe_size_bz_4 = builtin to_bystr4 size_bz_padded in (* must be 32 bytes long for proper extraction *)
+          match maybe_size_bz_4 with
+          | None =>
             (* ERR! just blow up here *)
             let exception_code = Uint32 1003 in (* make this err easy to find *)
             let s = builtin sub u0x00 exception_code in
             Pair {Uint32 Uint32} s offset
-            | Some p => match p with | Pair s _ =>
+          | Some size_bz_4 =>
+            let size = builtin to_uint32 size_bz_4 in
             let next_offset = let x = builtin sub k u0xf6 in builtin add x offset in
-            Pair {Uint32 Uint32} s next_offset
-            end end
-          end
-          end
-          end
+            Pair {Uint32 Uint32} size next_offset
           end
         end
+        end
+        end
+        end
       end
+    end
 
 (* NOTE: do NOT use `raw` with offset < returned offset as it has not been modified. *)
 let rlp_split : ByStr -> Uint32 -> Pair ByStr Uint32 =
@@ -542,34 +418,6 @@ let rlp_split : ByStr -> Uint32 -> Pair ByStr Uint32 =
       }
     *)
     let p = rlp_read_kind raw offset in
-    match p with
-    | Pair size data_offset =>
-      let res = builtin substr raw data_offset size in (* ignore `bytes` prefix and just return the data *)
-      let next_offset = builtin add size data_offset in
-      Pair {ByStr Uint32} res next_offset
-    end
-
-(* NOTE: do NOT use `raw` with offset < returned offset as it has not been modified. *)
-let old_rlp_split : ByStr -> Uint32 -> Pair ByStr Uint32 =
-  fun (raw : ByStr) =>
-  fun (offset : Uint32) =>
-    (*
-      uint size;
-      (size,offset_) = rlpReadKind(raw,offset);
-      // [offset_,...offset_+size]
-      assembly {
-          mstore(add(raw,sub(offset_,0x20)),size)
-          // write size into the 32 bytes before the data
-          // [offset_-32,...,offset_,...,offset_+size]
-          res := add(raw,sub(offset_,0x20))
-          // return next offset starting from the size
-          // [res,...,offset_,...,offset_+size]
-          offset_ := add(offset_,size)
-          // replace offset_ to end
-          // [res,...,o,...,offset_,...]
-      }
-    *)
-    let p = old_rlp_read_kind raw offset in
     match p with
     | Pair size data_offset =>
       let res = builtin substr raw data_offset size in (* ignore `bytes` prefix and just return the data *)
@@ -1110,44 +958,6 @@ let bytes_to_hex : ByStr -> ByStr =
     let paddedString = left_pad_zero keyBytes in
     builtin concat paddedString ten_padding
 
-let old_check_node_hash : ByStr -> Uint32 -> ByStr -> Bool =
-  fun (raw: ByStr) =>
-  fun (offset: Uint32) =>
-  fun (hash: ByStr) =>
-    let p = old_rlp_read_kind raw offset in
-    let size = get_size p in
-    let offset_ = get_offset p in
-    let offsetDiff = builtin sub offset_ offset in
-    let fullSize = builtin add size offsetDiff in
-    let lt_0x20 = builtin lt fullSize u0x20 in
-    match lt_0x20 with
-    | True =>
-      let subHash = builtin substr hash u0x00 fullSize in
-      let subRaw = builtin substr raw u0x00 fullSize in
-      let isEqual = builtin eq subHash subRaw in
-      match isEqual with
-      | True =>
-        let hashLen = builtin strlen hash in
-        let isHashSameSize = builtin eq hashLen fullSize in
-        match isHashSameSize with
-        | True => True
-        | False => False
-        end
-      | False => False
-      end
-      | False =>
-      let hashedSum = let substrHashedSum = builtin substr raw offset fullSize in builtin keccak256hash substrHashedSum in
-      let paddedHash = pad hash u0x20 in
-      let paddedHash20 = builtin to_bystr32 paddedHash in
-      match paddedHash20 with
-      | None =>
-        (* ERR! just blow up here *)
-        False
-      | Some paddedHash20Fixed =>
-        builtin eq hashedSum paddedHash20Fixed
-      end
-    end
-
 let check_node_hash : ByStr -> Uint32 -> ByStr -> Bool =
   fun (raw: ByStr) =>
   fun (offset: Uint32) =>
@@ -1308,7 +1118,7 @@ let verify_proof : ByStr -> ByStr -> ByStr -> Pair ByStr Bool =
     fun (initKey : ByStr) =>
     fun (initRoot : ByStr) =>
       let key = bytes_to_hex initKey in
-      let proofSplit = old_rlp_split initProof u0x00 in
+      let proofSplit = rlp_split initProof u0x00 in
       let proof = get_data proofSplit in
       let value = initRoot in
       let initOffset = u0x00 in
@@ -1317,7 +1127,6 @@ let verify_proof : ByStr -> ByStr -> ByStr -> Pair ByStr Bool =
       let fold = @nat_fold_while KeyOffsetValue in
       let fn = fun (cur : KeyOffsetValue) => fun (num : Nat) =>
         let i = nat_to_int num in
-        let isFirstLoop = builtin eq u0x20 i in
         let currentValue = get_value cur in
         let currentKey = get_key cur in
         let currentOffset = get_key_offset cur in
@@ -1325,11 +1134,7 @@ let verify_proof : ByStr -> ByStr -> ByStr -> Pair ByStr Bool =
         match isOffsetLt with
         | False => None {KeyOffsetValue}
         | True =>
-          let isEqualNodeHash = match isFirstLoop with
-          | True => old_check_node_hash proof currentOffset currentValue
-          | False => check_node_hash proof currentOffset currentValue
-          end
-          in
+          let isEqualNodeHash = check_node_hash proof currentOffset currentValue in
           match isEqualNodeHash with
           | False => 
             (*throw error invalid node hash*)
@@ -1337,13 +1142,7 @@ let verify_proof : ByStr -> ByStr -> ByStr -> Pair ByStr Bool =
             let err = builtin sub u0x00 exception_code in
             None {KeyOffsetValue}
           | True =>
-            let split = match isFirstLoop with
-            | True =>
-              old_rlp_split proof currentOffset
-            | False =>
-              rlp_split proof currentOffset
-            end
-            in
+            let split = rlp_split proof currentOffset in
             let node = get_data split in
             let newOffset = get_split_offset split in
             let tmpReadKind = rlp_read_kind node u0x00 in
