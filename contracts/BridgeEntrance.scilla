@@ -11,6 +11,7 @@ let uint256_one = Uint256 1
 let uint128_zero = Uint128 0
 let uint32_zero = Uint32 0
 let uint32_20 = Uint32 20
+let empty = ""
 let zero_address = 0x0000000000000000000000000000000000000000
 let zero_bystr = let a = 0x in builtin to_bystr a
 let true = True
@@ -37,6 +38,7 @@ type Error =
   | NotPendingAdmin
   | NotAdmin
   | PendingAdminNotEmpty
+  | LockAmountMismatch
 
 let make_error =
   fun (result: Error) =>
@@ -53,6 +55,7 @@ let make_error =
       | IllegalRegisterAssetArgs      => Int32 -9
       | InvalidFeeAmount              => Int32 -10
       | InvalidLockProxyContract      => Int32 -11
+      | LockAmountMismatch            => Int32 -12
       end
     in
     { _exception: "Error"; code: result_code }
@@ -182,11 +185,10 @@ procedure CrossChain(
 end
 
 procedure ValidateAddrLength(proxyAddr: ByStr)
-  length = builtin strlen proxyAddr;
-  is_addr = builtin eq length uint32_20;
-  match is_addr with
-  | True =>
+  is_empty_string = builtin eq zero_bystr proxyAddr;
+  match is_empty_string with
   | False =>
+  | True =>
     e = IllegalRegisterAssetArgs;
     ThrowError e
   end
@@ -215,13 +217,12 @@ procedure ValidateFeeAmount(feeAmount: Uint128, amount: Uint128)
 end
 
 procedure ValidateHashLength(hash: ByStr)
-  hash_length = builtin strlen hash;
-  zero_length = builtin eq hash_length uint32_zero;
-  match zero_length with
+  is_empty_string = builtin eq zero_bystr hash;
+  match is_empty_string with
+  | False =>
   | True =>
     e = EmptyHashStr;
     ThrowError e
-  | False =>
   end
 end
 
@@ -285,6 +286,15 @@ procedure TransferToLockProxy(tokenAddr: ByStr20, lock_proxy: ByStr20, amount: U
   is_asset_zil = builtin eq tokenAddr zero_address;
   match is_asset_zil with
   | True =>
+    accept;
+    is_amount_correct = builtin eq _amount amount;
+    match is_amount_correct with
+    | True => (* no-op *)
+    | False =>
+      e = LockAmountMismatch;
+      ThrowError e
+    end;
+
    (* Transfer ZIL to LockProxy *)
     TransferNativeZILToLockProxy lock_proxy amount;
     e = {
@@ -372,7 +382,8 @@ end
 
 (* Perform a deposit to the LockProxy contract *)
 (* @param tokenAddr: the address of the token to deposit *)
-(* @param recoveryAddress: the hex version of the Switcheo Carbon recovery address to deposit to *)
+(* @param targetProxyHash: the associated proxy hash on Carbon *)
+(* @param recoveryAddress: the Carbon recovery address to receive funds on event of failure *)
 (* @param fromAssetDenom: denom of the asset deposited, in hex *)
 (* @param withdrawFeeAddress: the hex version of the Switcheo TradeHub address to send the fee to *)
 (* @param toAddress: LockProxy address. Address to transfer assets to *)
@@ -399,7 +410,7 @@ transition Lock(
       field manager_proxy: ByStr20,
       field counterpart_chainId: Uint64,
       field register: Map ByStr20 ByStr32
-      end;
+    end;
     match maybe_lock_proxy with
     | Some l_proxy =>
       TransferToLockProxy tokenAddr l_proxy amount_uint128;
@@ -452,15 +463,6 @@ transition UpdateLockProxy(new_lock_proxy: ByStr20)
     e = {_eventname : "UpdatedLockProxy"; intial_lock_proxy: l_proxy; new_lock_proxy: new_lock_proxy};
     event e
   end
-end
-
-(* @dev: Removes the current_owner. Must not have a pending owner. *)
-transition RevokeOwnership()
-  IsAdmin _sender;
-  NoPendingAdmin;
-  current_admin := none;
-  e = {_eventname : "OwnershipRevoked"; current_admin : _sender};
-  event e
 end
 
 (* @dev: Transfers contract ownership to a new address. The new address must call the AcceptOwnership transition to finalize the transfer. *)
