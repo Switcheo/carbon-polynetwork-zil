@@ -85,6 +85,7 @@ type Error =
   | CodeUnequalNodeHash
   | CodeCompareKeyFailed
   | CodeKeyLengthNotZero
+  | CodeProxyValidationFailed
 
 let make_error =
   fun (result : Error) =>
@@ -104,6 +105,7 @@ let make_error =
       | CodeUnequalNodeHash           => Int32 -12
       | CodeCompareKeyFailed          => Int32 -13
       | CodeKeyLengthNotZero          => Int32 -14
+      | CodeProxyValidationFailed     => Int32 -15
       end
     in
     { _exception : "Error"; code : result_code }
@@ -657,33 +659,24 @@ let has_enough_signers : List ByStr20 -> List ByStr20 -> Bool =
     *)
     let val_count = address_list_length validators in
     let required = let x = builtin mul val_count u0x02 in let y = builtin div x u0x03 in builtin add y u0x01 in
-    let acc = Pair {(List ByStr20) Uint32} signers u0x00 in (* unused signers, valid signature count *)
-    let fold = @list_foldl ByStr20 (Pair (List ByStr20) Uint32) in
-    let fold_fn = fun (acc : Pair (List ByStr20) Uint32) => fun (validator : ByStr20) =>
-      match acc with
-      | Pair remaining_signers signed_count =>
-        let finder = @list_exists ByStr20 in
-        let equality_fn = fun (signer : ByStr20) => builtin eq signer validator in
-        let found = finder equality_fn signers in
-        match found with
-        | True =>
-          (* NOTE: here we assume that all validators are unique, which should be ok? *)
-          let filter = @list_filter ByStr20 in
-          let new_remaining_signers = filter equality_fn remaining_signers in
-          let new_count = builtin add signed_count u0x01 in
-          Pair {(List ByStr20) Uint32} new_remaining_signers new_count
-        | False => acc (* no change if not found *)
-        end
+    let fold = @list_foldl ByStr20 Uint32 in
+    let fold_fn = fun (acc : Uint32) => fun (validator : ByStr20) =>
+      let finder = @list_exists ByStr20 in
+      let equality_fn = fun (signer : ByStr20) => builtin eq signer validator in
+      let found = finder equality_fn signers in
+      match found with
+      | True =>
+        (* NOTE: here we assume that all validators are unique, which should be ok? *)
+        (* if validators are not unique, have to filter signers list to prevent double counting *)
+        builtin add acc u0x01
+      | False => acc (* no change if not found *)
       end
     in
-    let res = fold fold_fn acc validators in
-    match res with
-    | Pair _ matched =>
-      let insufficient = builtin lt required matched in
-      match insufficient with
+    let matched = fold fold_fn u0x00 validators in
+    let insufficient = builtin lt required matched in
+    match insufficient with
       | True => False
       | False => True
-      end
     end
 
 let verify_seal : ByStr32 -> ByStr -> ByStr20 =
@@ -1303,6 +1296,7 @@ let verify_account_proof : ByStr -> ByStr -> ByStr20 -> ByStr -> ByStr -> ByStr 
 
 contract ZilCrossChainManagerV2(
   initial_owner: ByStr20,
+  init_proxy_address: ByStr20,
   eccd: ByStr20 with contract
     field cur_epoch_validators : List ByStr20,
     field cur_epoch_start_height : Uint256,
@@ -1323,6 +1317,16 @@ procedure ThrowError(err : Error)
   throw e
 end
 
+procedure IsProxy()
+  is_proxy = builtin eq _sender init_proxy_address;
+  match is_proxy with
+  | True  =>
+  | False =>
+    err = CodeProxyValidationFailed;
+    ThrowError err
+  end
+end
+
 procedure IsNotEmptyVals(vals : List ByStr20)
   is_empty = let l = address_list_length vals in builtin eq l u0x00;
   match is_empty with
@@ -1333,6 +1337,30 @@ procedure IsNotEmptyVals(vals : List ByStr20)
   end
 end
 
+procedure RequireValidToContract(toContract : ByStr20)
+  is_proxy = builtin eq toContract init_proxy_address;
+  match is_proxy with
+  | True =>
+    err = CodeInvalidToContract;
+    ThrowError err
+  | False =>
+  end;
+  is_eccd = builtin eq toContract eccd;
+  match is_eccd with
+  | True =>
+    err = CodeInvalidToContract;
+    ThrowError err
+  | False =>
+  end;
+  is_self = builtin eq toContract _this_address;
+  match is_self with
+  | True =>
+    err = CodeInvalidToContract;
+    ThrowError err
+  | False =>
+  end
+end
+
 procedure ExecuteCrossChainTx(
   toContract : ByStr,
   method : ByStr,
@@ -1340,14 +1368,14 @@ procedure ExecuteCrossChainTx(
   fromContractAddr : ByStr,
   fromChainId : Uint64
 )
-  (* TODO: ensure to_contract is not proxy or data or this contract *)
   r = builtin to_bystr20 toContract;
   match r with
   | None =>
     err = CodeInvalidToContract;
     ThrowError err
   | Some recipient =>
-    tag = builtin to_string method;
+    RequireValidToContract recipient;
+    tag = builtin to_ascii method;
     msg_to_recipient =  {
       _tag : tag; _recipient: recipient; _amount: zero_amt;
       args: args; fromContractAddr: fromContractAddr; fromChainId: fromChainId
@@ -1402,6 +1430,7 @@ end
 transition InitGenesisBlock(
   rawHeader : ByStr
 )
+  IsProxy;
   header = decode_header rawHeader;
 
   (* verify isInit *)
@@ -1439,6 +1468,7 @@ transition ChangeEpoch(
   rawHeader : ByStr,
   rawSeals : ByStr
 )
+  IsProxy;
   header = decode_header rawHeader;
   number = get_number header;
 
@@ -1493,6 +1523,7 @@ transition CrossChain(
     bytes memory paramTxHash = ECCUtils.uint256ToBytes(txHashIndex);
     bytes memory crossChainId = abi.encodePacked(sha256(abi.encodePacked(address(this), paramTxHash)));
   *)
+  IsProxy;
   idx <- & eccd.cur_to_zion_index;
   idx_bz = let b = builtin to_bystr32 idx in builtin to_bystr b;
   id_bz = let a = builtin to_bystr _this_address in builtin concat a idx_bz;
@@ -1529,6 +1560,7 @@ transition VerifyHeaderAndExecuteTx(
   storageProof : ByStr,
   rawCrossTx : ByStr
 )
+  IsProxy;
   header = decode_header rawHeader;
   cross_tx = decode_cross_tx rawCrossTx;
   number = get_number header;
@@ -1555,7 +1587,6 @@ transition VerifyHeaderAndExecuteTx(
     ThrowError err
   end;
 
-  (* TODO: verify proof *)
   (*
     bytes memory storageIndex = ECCUtils.getCrossTxStorageSlot(crossTx);
     bytes memory storageValue = ECCUtils.verifyAccountProof(accountProof, header.root, ZionCrossChainManagerAddress, storageProof, storageIndex);

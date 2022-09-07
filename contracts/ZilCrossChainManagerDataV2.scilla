@@ -112,11 +112,13 @@ end
 (***************************************)
 
 transition PutEpochInfo(epoch_start_height: Uint256, epoch_validators: List ByStr20)
+  IsCCM;
   cur_epoch_start_height := epoch_start_height;
   cur_epoch_validators := epoch_validators
 end
 
 transition PutTxHash(tx_hash: ByStr32)
+  IsCCM;
   idx <- cur_to_zion_index;
   to_zion_tx_hashes[idx] := tx_hash;
   new_idx = builtin add idx one;
@@ -124,6 +126,7 @@ transition PutTxHash(tx_hash: ByStr32)
 end
 
 transition MarkTxExecuted(from_chain_id: Uint64, from_tx_hash: ByStr32)
+  IsCCM;
   from_chain_tx_exists[from_chain_id][from_tx_hash] := true
 end
 
