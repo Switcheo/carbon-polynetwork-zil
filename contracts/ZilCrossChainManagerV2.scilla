@@ -1,6 +1,6 @@
 scilla_version 0
 
-import Conversions PairUtils ListUtils NatUtils
+import Conversions PairUtils ListUtils NatUtils BoolUtils
 
 (* See: https://github.com/polynetwork/eth-contracts/blob/2.0/contracts/core/cross_chain_manager/logic/EthCrossChainManagerImplementation.sol *)
 
@@ -213,6 +213,15 @@ let grow : Uint32 -> Uint256 =
     | None => Uint256 0 (* should never happen: u32->u256 *)
     end
 
+(* converts a Uint64 to a Uint256 *)
+let grow_u64 : Uint64 -> Uint256 =
+  fun (var : Uint64) =>
+    let maybe_big = builtin to_uint256 var in
+    match maybe_big with
+    | Some big => big
+    | None => Uint256 0 (* should never happen: u364>u256 *)
+    end
+
 (* extracts the address from Pair (address, offset) *)
 let get_address : Pair ByStr20 Uint32 -> ByStr20 = @fst ByStr20 Uint32
 
@@ -227,6 +236,12 @@ let get_size : Pair Uint32 Uint32 -> Uint32 = @fst Uint32 Uint32
 
 (* extracts the offset from Pair (size, offset) *)
 let get_offset : Pair Uint32 Uint32 -> Uint32 = @snd Uint32 Uint32
+
+(* extracts the offset from Pair (data_u64, offset_u32) *)
+let get_offset_u64 : Pair Uint64 Uint32 -> Uint32 = @snd Uint64 Uint32
+
+(* extracts the data from Pair (data_u64, offset_u32) *)
+let get_data_u64 : Pair Uint64 Uint32 -> Uint64 = @fst Uint64 Uint32
 
 (* extracts the size + offset from Pair (size, offset) *)
 let get_data_offset : Pair Uint32 Uint32 -> Uint32 =
@@ -589,22 +604,25 @@ let decode_header : ByStr -> Header =
       end
     end
 
-let get_validators_from_header : ByStr -> List ByStr20 =
+let get_header_validators_and_epoch_end_height : ByStr -> Pair Uint256 (List ByStr20) =
   fun (rawHeader : ByStr) =>
   (*
-    (,uint offset) = rlpReadKind(rawHeader,0x20); // accounting for `bytes` prefix, not required for ByStr
+    (,uint offset) = rlpReadKind(rawHeader,0x20);
     (size,offset) = rlpReadKind(rawHeader, offset + 445 ); // position of Difficulty
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of Number
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of GasLimit
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of GasUsed
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of Time
-    (bytes memory extra,) = rlpGetNextBytes(rawHeader, offset + size);
-    (bytes memory validatorsBytes,) = rlpGetNextBytes(extra, 0x40); // accounting for `bytes` prefix, not required for ByStr
-    (size, offset) = rlpReadKind(validatorsBytes, 0x20); // accounting for `bytes` prefix, not required for ByStr
+    (,offset) = rlpReadKind(rawHeader, offset + size); // position of Extra(with digest)
+    (,offset) = rlpReadKind(rawHeader, offset + 0x20); // position of Extra(without digest) , a bytes32 digest is appended before extra
+    (size,offset) = rlpReadKind(rawHeader, offset);        // position of Extra.EpochStartHeight
+    (endHeight,offset) = rlpGetNextUint64(rawHeader, offset + size); // position of Extra.EpochEndHeight
+    (bytes memory validatorsBytes,) = rlpGetNextBytes(rawHeader, offset);
+    size = validatorsBytes.length;
     require(size%ZION_ADDRESS_LEN==0,"invalid header extra validatorSet");
     validators = new address[](size/ZION_ADDRESS_LEN);
     for (uint i = 0; i*ZION_ADDRESS_LEN<size; i++) {
-        (address valAddr,) = rlpGetNextAddress(validatorsBytes, offset + i*ZION_ADDRESS_LEN);
+        (address valAddr,) = rlpGetNextAddress(validatorsBytes, 0x20 + i*ZION_ADDRESS_LEN);
         validators[i] = valAddr;
     }
   *)
@@ -616,28 +634,30 @@ let get_validators_from_header : ByStr -> List ByStr20 =
   let p4 = let o = get_data_offset p3 in rlp_read_kind rawHeader o in (* position of GasLimit *)
   let p5 = let o = get_data_offset p4 in rlp_read_kind rawHeader o in (* position of GasUsed *)
   let p6 = let o = get_data_offset p5 in rlp_read_kind rawHeader o in (* position of Time *)
-  let extra = let o = get_data_offset p6 in let b = rlp_get_next_bytes rawHeader o in get_data b in
-  let val_bz = let b = rlp_get_next_bytes extra u0x20 in get_data b in (* ignore `bytes` prefix *)
-  let p = rlp_read_kind val_bz u0x00 in
-  match p with
-  | Pair size offset =>
-    let check = builtin rem size zion_address_length in
-    let throw_if_not_zero = builtin sub u0x00 check in
-    let length = builtin div size zion_address_length in
-    let initial = Nil {ByStr20} in
-    let count = builtin to_nat length in
-    let fold = @nat_fold (List ByStr20) in
-    let fn = fun (cur : List ByStr20) => fun (num : Nat) =>
-      let i = nat_to_int num in
-      let o = let n = builtin mul i zion_address_length in builtin add offset n in
-      let r = rlp_get_next_address val_bz o in
-      let val = get_address r in
-      Cons {ByStr20} val cur
-    in
-    (* array is constructed by pushing to the head of list - reverse to maintain right order *)
-    let array = fold fn initial count in
-    array
-  end
+  let p7 = let o = get_data_offset p6 in rlp_read_kind rawHeader o in (* position of Extra(with digest) *)
+  let p8 = let o1 = get_offset p7 in let o = builtin add o1 u0x20 in rlp_read_kind rawHeader o in (* position of Extra(without digest) , a bytes32 digest is appended before extra *)
+  let p9 = let o = get_offset p8 in rlp_read_kind rawHeader o in (* position of Extra.EpochStartHeight *)
+  let p10 = let o = get_data_offset p9 in rlp_get_next_uint64 rawHeader o in (* position of Extra.EpochEndHeight *)
+  let epoch_end_height_u64 = get_data_u64 p10 in
+  let epoch_end_height_u256 = grow_u64 epoch_end_height_u64 in
+  let val_bz = let o = get_offset_u64 p10 in let b = rlp_get_next_bytes rawHeader o in get_data b in
+  let size = builtin strlen val_bz in
+  let check = builtin rem size zion_address_length in
+  let throw_if_not_zero = builtin sub u0x00 check in
+  let length = builtin div size zion_address_length in
+  let initial = Nil {ByStr20} in
+  let count = builtin to_nat length in
+  let fold = @nat_fold (List ByStr20) in
+  let fn = fun (cur : List ByStr20) => fun (num : Nat) =>
+    let i = nat_to_int num in
+    let o = builtin mul i zion_address_length in
+    let r = rlp_get_next_address val_bz o in
+    let val = get_address r in
+    Cons {ByStr20} val cur
+  in
+  (* array is constructed by pushing to the head of list - reverse to maintain right order *)
+  let array = fold fn initial count in
+  Pair {Uint256 (List ByStr20)} epoch_end_height_u256 array
 
 let has_enough_signers : List ByStr20 -> List ByStr20 -> Bool =
   fun (validators : List ByStr20) =>
@@ -1300,6 +1320,7 @@ contract ZilCrossChainManagerV2(
   eccd: ByStr20 with contract
     field cur_epoch_validators : List ByStr20,
     field cur_epoch_start_height : Uint256,
+    field cur_epoch_end_height : Uint256,
     field cur_to_zion_index : Uint256,
     field from_chain_tx_exists : Map Uint64 (Map ByStr32 Bool)
   end
@@ -1443,25 +1464,28 @@ transition InitGenesisBlock(
     ThrowError err
   end;
 
-  (* get validators *)
-  vals = get_validators_from_header rawHeader;
-  IsNotEmptyVals vals;
+  (* get validators and epoch_end_height *)
+  epoch_end_vals_pair = get_header_validators_and_epoch_end_height rawHeader;
+  match epoch_end_vals_pair with
+  | Pair epoch_end_height vals =>
+    IsNotEmptyVals vals;
 
-  (* put epoch information *)
-  number = get_number header;
-  start_height = builtin add one number;
-  msg_to_eccd =  {
-    _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
-    epoch_start_height: start_height; epoch_validators: vals
-  };
-  msgs = one_msg msg_to_eccd;
-  send msgs;
+    (* put epoch information *)
+    number = get_number header;
+    start_height = builtin add one number;
+    msg_to_eccd =  {
+      _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
+      epoch_start_height: start_height; epoch_end_height: epoch_end_height; epoch_validators: vals
+    };
+    msgs = one_msg msg_to_eccd;
+    send msgs;
 
-  e = {
-    _eventname: "GenesisBlockInitialized";
-    number: number; rawHeader: rawHeader
-  };
-  event e
+    e = {
+      _eventname: "GenesisBlockInitialized";
+      number: number; rawHeader: rawHeader
+    };
+    event e
+  end
 end
 
 transition ChangeEpoch(
@@ -1474,8 +1498,11 @@ transition ChangeEpoch(
 
   (* verify block.height *)
   cur_epoch_start_height <- & eccd.cur_epoch_start_height;
+  cur_epoch_end_height <- & eccd.cur_epoch_end_height;
   is_lower = builtin lt number cur_epoch_start_height;
-  match is_lower with
+  is_after = builtin lt cur_epoch_end_height number;
+  is_invalid = orb is_lower is_after;
+  match is_invalid with
   | False => (* ok*)
   | True =>
     err = CodeInvalidBlockHeight;
@@ -1483,32 +1510,35 @@ transition ChangeEpoch(
   end;
 
   (* verify header *)
-  new_vals = get_validators_from_header rawHeader;
-  IsNotEmptyVals new_vals;
-  prev_vals <- & eccd.cur_epoch_validators;
-  hash = builtin keccak256hash rawHeader;
-  ok = verify_header hash rawSeals prev_vals;
-  match ok with
-  | True => (* ok *)
-  | False =>
-    err = CodeHeaderVerificationFailed;
-    ThrowError err
-  end;
+  epoch_end_new_vals_pair = get_header_validators_and_epoch_end_height rawHeader;
+  match epoch_end_new_vals_pair with
+  | Pair epoch_end_height new_vals =>
+    IsNotEmptyVals new_vals;
+    prev_vals <- & eccd.cur_epoch_validators;
+    hash = builtin keccak256hash rawHeader;
+    ok = verify_header hash rawSeals prev_vals;
+    match ok with
+    | True => (* ok *)
+    | False =>
+      err = CodeHeaderVerificationFailed;
+      ThrowError err
+    end;
 
-  (* put new epoch information *)
-  start_height = builtin add one number;
-  msg_to_eccd =  {
-    _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
-    epoch_start_height: start_height; epoch_validators: new_vals
-  };
-  msgs = one_msg msg_to_eccd;
-  send msgs;
+    (* put new epoch information *)
+    start_height = builtin add one number;
+    msg_to_eccd =  {
+      _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
+      epoch_start_height: start_height; epoch_end_height: epoch_end_height; epoch_validators: new_vals
+    };
+    msgs = one_msg msg_to_eccd;
+    send msgs;
 
-  e = {
-    _eventname: "EpochChanged";
-    number: number; rawHeader: rawHeader; previousValidators: prev_vals; newValidators: new_vals
-  };
-  event e
+    e = {
+      _eventname: "EpochChanged";
+      number: number; rawHeader: rawHeader; previousValidators: prev_vals; newValidators: new_vals
+    };
+    event e
+  end
 end
 
 transition CrossChain(
@@ -1568,8 +1598,11 @@ transition VerifyHeaderAndExecuteTx(
 
   (* verify block.height *)
   cur_epoch_start_height <- & eccd.cur_epoch_start_height;
+  cur_epoch_end_height <- & eccd.cur_epoch_end_height;
   is_lower = builtin lt number cur_epoch_start_height;
-  match is_lower with
+  is_after = builtin lt cur_epoch_end_height number;
+  is_invalid = orb is_lower is_after;
+  match is_invalid with
   | False => (* ok*)
   | True =>
     err = CodeInvalidBlockHeight;
