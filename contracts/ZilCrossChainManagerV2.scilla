@@ -1578,7 +1578,7 @@ transition CrossChain(
     proxyOrAssetContract : _sender;
     toChainId : toChainId;
     toContract : toContract;
-    rawdata : params
+    rawdata : params_bz
   };
   event e
 end
