@@ -379,7 +379,8 @@ end
 procedure CrossChain(toChainId: Uint64, toContract: ByStr, method: ByStr, txData: ByStr)
   manager_proxy_l <- manager_proxy;
   msg = {_tag: "CrossChain"; _recipient: manager_proxy_l; _amount: uint128_zero; 
-        toChainId: toChainId; toContract: toContract; method: method; txData: txData };
+        toChainId: toChainId; toContract: toContract; method: method; txData: txData;
+        originContractAddr: _this_address };
   msgs = one_msg msg;
   send msgs
 end

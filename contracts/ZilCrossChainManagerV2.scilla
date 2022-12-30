@@ -277,16 +277,10 @@ let pad_bytes: ByStr -> ByStr =
   fun (bz : ByStr) =>
     let data_length = builtin strlen bz in
     let padding_length = builtin rem data_length u0x20 in
-    let padding_not_required = builtin eq padding_length u0x00 in
-    match padding_not_required with
-    | True => bz
-    | False =>
-      let padding_required = builtin sub u0x20 padding_length in
-      let fold = @nat_fold ByStr in
-      let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat cur padding in
-      let count = builtin to_nat padding_required in
-      fold fn bz count
-    end
+    let fold = @nat_fold ByStr in
+    let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat cur padding in
+    let count = builtin to_nat padding_length in
+    fold fn bz count
 
 let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
   fun (raw : ByStr) =>
@@ -827,12 +821,6 @@ let abi_encode_bytes : ByStr -> ByStr =
     let data_bz = pad_bytes bz in
     builtin concat len_bz data_bz
 
-let abi_encode_u64 : Uint64 -> ByStr =
-  fun (num : Uint64) =>
-    let bz_8 = builtin to_bystr8 num in
-    let bz = builtin to_bystr bz_8 in
-    pad bz u0x20
-
 let abi_encode_packed : ByStr -> ByStr -> ByStr =
   fun (first : ByStr) =>
   fun (second : ByStr) =>
@@ -852,32 +840,30 @@ let encode_tx_param : TxParam -> ByStr =
       let t1 = abi_encode_bytes txHash in
       let t2 = abi_encode_bytes crossChainId in
       let t3 = abi_encode_bytes fromContract in
-      let t4 = abi_encode_u64 toChainId in
+      let t4 = builtin to_bystr empty_abi_encoded_string in
       let t5 = abi_encode_bytes toContract in
       let t6 = abi_encode_bytes method in
-      let t7 = abi_encode_bytes args in
       (* compute offsets *)
       let o1 = u0xe0 in (* initial offset of 7 x 32 = 224 bytes used for headers *)
       let o2 = next_offset o1 t1 in
       let o3 = next_offset o2 t2 in
-      let o5 = next_offset o3 t3 in
+      let o4 = next_offset o3 t3 in
+      let o5 = next_offset o4 t4 in
       let o6 = next_offset o5 t5 in
-      let o7 = next_offset o6 t6 in
       (* head: offsets *)
       let h1 = abi_encode_length o1 in
       let h2 = append_abi_encoded_length h1 o2 in
       let h3 = append_abi_encoded_length h2 o3 in
-      let h4 = builtin concat h3 t4 in (* uint64 is a fixed type *)
+      let h4 = append_abi_encoded_length h3 o4 in (* uint64 is a fixed type *)
       let h5 = append_abi_encoded_length h4 o5 in
       let h6 = append_abi_encoded_length h5 o6 in
-      let h7 = append_abi_encoded_length h6 o7 in
       (* combine head to with tail *)
-      let c1 = builtin concat h7 t1 in
+      let c1 = builtin concat h6 t1 in
       let c2 = builtin concat c1 t2 in
       let c3 = builtin concat c2 t3 in
-      let c4 = builtin concat c3 t5 in
-      let c5 = builtin concat c4 t6 in
-      builtin concat c5 t7
+      let c4 = builtin concat c3 t4 in
+      let c5 = builtin concat c4 t5 in
+      builtin concat c5 t6
     end
 
 let decode_tx_param : ByStr -> TxParam =
@@ -1559,7 +1545,8 @@ transition CrossChain(
   toChainId : Uint64,
   toContract : ByStr,
   method : ByStr,
-  txData : ByStr
+  txData : ByStr,
+  originContractAddr: ByStr20
 )
   (*
     require(CallerFactory(EthCrossChainCallerFactoryAddress).isChild(msg.sender), "The caller is child of the caller factory!");
@@ -1572,8 +1559,8 @@ transition CrossChain(
   idx_bz = let b = builtin to_bystr32 idx in builtin to_bystr b;
   id_bz = let a = builtin to_bystr _this_address in builtin concat a idx_bz;
   cross_chain_id = let hash = builtin keccak256hash id_bz in builtin to_bystr hash;
-  sender = builtin to_bystr _sender;
-  params = TxParam idx_bz cross_chain_id sender toChainId toContract method txData;
+  fromContract = builtin to_bystr originContractAddr;
+  params = TxParam idx_bz cross_chain_id fromContract toChainId toContract method txData;
   params_bz = encode_tx_param params;
   tx_hash = builtin keccak256hash params_bz;
 
