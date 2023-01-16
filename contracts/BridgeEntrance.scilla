@@ -179,7 +179,7 @@ procedure CrossChain(
 )
   manager_proxy_l <- & l_proxy.manager_proxy;
   msg = {_tag: "CrossChain"; _recipient: manager_proxy_l; _amount: uint128_zero; 
-        toChainId: toChainId; toContract: toContract; method: method; txData: txData };
+        toChainId: toChainId; toContract: toContract; method: method; txData: txData; originContractAddr: l_proxy };
   msgs = one_msg msg;
   send msgs
 end
