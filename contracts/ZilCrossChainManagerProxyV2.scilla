@@ -98,9 +98,9 @@ transition ChangeEpoch(rawHeader: ByStr, rawSeals: ByStr)
   send msgs
 end
 
-transition CrossChain(toChainId: Uint64, toContract: ByStr, method: ByStr, txData: ByStr, originContractAddr: ByStr20)
+transition CrossChain(toChainId: Uint64, toContract: ByStr, method: ByStr, txData: ByStr)
   current_impl <- crosschain_manager;
-  msg = {_tag: "CrossChain"; _recipient: current_impl; _amount: zero; toChainId: toChainId; toContract: toContract; method: method; txData: txData; originContractAddr: originContractAddr};
+  msg = {_tag: "CrossChain"; _recipient: current_impl; _amount: zero; toChainId: toChainId; toContract: toContract; method: method; txData: txData; originContractAddr: _sender};
   msgs = one_msg msg;
   send msgs
 end
