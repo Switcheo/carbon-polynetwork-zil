@@ -1644,19 +1644,29 @@ transition VerifyHeaderAndExecuteTx(
   storage_index = get_cross_tx_storage_slot cross_tx;
   storage_value = verify_account_proof accountProof root zion_ccm_address storageProof storage_index;
   keccakCrossTx = builtin keccak256hash rawCrossTx;
-  maybe_storage_value_bystr32 = builtin to_bystr32 storage_value;
-  match maybe_storage_value_bystr32 with
-  | Some storage_value_bystr32 =>
-    isEqual = builtin eq keccakCrossTx storage_value_bystr32;
-    match isEqual with
-    | True =>
-    | False =>
+  (* if < 32 bytes, prepend till 32, if > 32 bytes, throw error *)
+  storage_value_len = builtin strlen storage_value;
+  storage_value_len_gt_32 = builtin lt u0x20 storage_value_len;
+  match storage_value_len_gt_32 with
+  | True =>
+    err = CodeVerifyProofFailed;
+    ThrowError err
+  | False =>
+    storage_value_padded = pad storage_value u0x20;
+    maybe_storage_value_bystr32 = builtin to_bystr32 storage_value_padded;
+    match maybe_storage_value_bystr32 with
+    | Some storage_value_bystr32 =>
+      isEqual = builtin eq keccakCrossTx storage_value_bystr32;
+      match isEqual with
+      | True => (* ok *)
+      | False =>
+        err = CodeVerifyProofFailed;
+        ThrowError err
+      end
+    | None =>
       err = CodeVerifyProofFailed;
       ThrowError err
     end
-  | None =>
-    err = CodeVerifyProofFailed;
-    ThrowError err
   end;
 
   match cross_tx with
