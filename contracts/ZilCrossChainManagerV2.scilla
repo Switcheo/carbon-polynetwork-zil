@@ -1590,7 +1590,7 @@ transition CrossChain(
     _eventname : "CrossChainEvent";
     sender : _origin;
     txId : idx_bz;
-    proxyOrAssetContract : _sender;
+    proxyOrAssetContract : fromContract;
     toChainId : toChainId;
     toContract : toContract;
     rawdata : params_bz
