@@ -1,6 +1,6 @@
 scilla_version 0
 
-import Conversions PairUtils ListUtils NatUtils
+import Conversions PairUtils ListUtils NatUtils BoolUtils
 
 (* See: https://github.com/polynetwork/eth-contracts/blob/2.0/contracts/core/cross_chain_manager/logic/EthCrossChainManagerImplementation.sol *)
 
@@ -85,6 +85,7 @@ type Error =
   | CodeUnequalNodeHash
   | CodeCompareKeyFailed
   | CodeKeyLengthNotZero
+  | CodeProxyValidationFailed
 
 let make_error =
   fun (result : Error) =>
@@ -104,6 +105,7 @@ let make_error =
       | CodeUnequalNodeHash           => Int32 -12
       | CodeCompareKeyFailed          => Int32 -13
       | CodeKeyLengthNotZero          => Int32 -14
+      | CodeProxyValidationFailed     => Int32 -15
       end
     in
     { _exception : "Error"; code : result_code }
@@ -211,6 +213,15 @@ let grow : Uint32 -> Uint256 =
     | None => Uint256 0 (* should never happen: u32->u256 *)
     end
 
+(* converts a Uint64 to a Uint256 *)
+let grow_u64 : Uint64 -> Uint256 =
+  fun (var : Uint64) =>
+    let maybe_big = builtin to_uint256 var in
+    match maybe_big with
+    | Some big => big
+    | None => Uint256 0 (* should never happen: u364>u256 *)
+    end
+
 (* extracts the address from Pair (address, offset) *)
 let get_address : Pair ByStr20 Uint32 -> ByStr20 = @fst ByStr20 Uint32
 
@@ -225,6 +236,12 @@ let get_size : Pair Uint32 Uint32 -> Uint32 = @fst Uint32 Uint32
 
 (* extracts the offset from Pair (size, offset) *)
 let get_offset : Pair Uint32 Uint32 -> Uint32 = @snd Uint32 Uint32
+
+(* extracts the offset from Pair (data_u64, offset_u32) *)
+let get_offset_u64 : Pair Uint64 Uint32 -> Uint32 = @snd Uint64 Uint32
+
+(* extracts the data from Pair (data_u64, offset_u32) *)
+let get_data_u64 : Pair Uint64 Uint32 -> Uint64 = @fst Uint64 Uint32
 
 (* extracts the size + offset from Pair (size, offset) *)
 let get_data_offset : Pair Uint32 Uint32 -> Uint32 =
@@ -260,10 +277,16 @@ let pad_bytes: ByStr -> ByStr =
   fun (bz : ByStr) =>
     let data_length = builtin strlen bz in
     let padding_length = builtin rem data_length u0x20 in
-    let fold = @nat_fold ByStr in
-    let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat cur padding in
-    let count = builtin to_nat padding_length in
-    fold fn bz count
+    let padding_not_required = builtin eq padding_length u0x00 in
+    match padding_not_required with
+    | True => bz
+    | False =>
+      let padding_required = builtin sub u0x20 padding_length in
+      let fold = @nat_fold ByStr in
+      let fn = fun (cur : ByStr) => fun (num : Nat) => builtin concat cur padding in
+      let count = builtin to_nat padding_required in
+      fold fn bz count
+    end
 
 let rlp_read_kind: ByStr -> Uint32 -> Pair Uint32 Uint32 =
   fun (raw : ByStr) =>
@@ -587,22 +610,25 @@ let decode_header : ByStr -> Header =
       end
     end
 
-let get_validators_from_header : ByStr -> List ByStr20 =
+let get_header_validators_and_epoch_end_height : ByStr -> Pair Uint256 (List ByStr20) =
   fun (rawHeader : ByStr) =>
   (*
-    (,uint offset) = rlpReadKind(rawHeader,0x20); // accounting for `bytes` prefix, not required for ByStr
+    (,uint offset) = rlpReadKind(rawHeader,0x20);
     (size,offset) = rlpReadKind(rawHeader, offset + 445 ); // position of Difficulty
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of Number
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of GasLimit
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of GasUsed
     (size,offset) = rlpReadKind(rawHeader, offset + size); // position of Time
-    (bytes memory extra,) = rlpGetNextBytes(rawHeader, offset + size);
-    (bytes memory validatorsBytes,) = rlpGetNextBytes(extra, 0x40); // accounting for `bytes` prefix, not required for ByStr
-    (size, offset) = rlpReadKind(validatorsBytes, 0x20); // accounting for `bytes` prefix, not required for ByStr
+    (,offset) = rlpReadKind(rawHeader, offset + size); // position of Extra(with digest)
+    (,offset) = rlpReadKind(rawHeader, offset + 0x20); // position of Extra(without digest) , a bytes32 digest is appended before extra
+    (size,offset) = rlpReadKind(rawHeader, offset);        // position of Extra.EpochStartHeight
+    (endHeight,offset) = rlpGetNextUint64(rawHeader, offset + size); // position of Extra.EpochEndHeight
+    (bytes memory validatorsBytes,) = rlpGetNextBytes(rawHeader, offset);
+    size = validatorsBytes.length;
     require(size%ZION_ADDRESS_LEN==0,"invalid header extra validatorSet");
     validators = new address[](size/ZION_ADDRESS_LEN);
     for (uint i = 0; i*ZION_ADDRESS_LEN<size; i++) {
-        (address valAddr,) = rlpGetNextAddress(validatorsBytes, offset + i*ZION_ADDRESS_LEN);
+        (address valAddr,) = rlpGetNextAddress(validatorsBytes, 0x20 + i*ZION_ADDRESS_LEN);
         validators[i] = valAddr;
     }
   *)
@@ -614,28 +640,30 @@ let get_validators_from_header : ByStr -> List ByStr20 =
   let p4 = let o = get_data_offset p3 in rlp_read_kind rawHeader o in (* position of GasLimit *)
   let p5 = let o = get_data_offset p4 in rlp_read_kind rawHeader o in (* position of GasUsed *)
   let p6 = let o = get_data_offset p5 in rlp_read_kind rawHeader o in (* position of Time *)
-  let extra = let o = get_data_offset p6 in let b = rlp_get_next_bytes rawHeader o in get_data b in
-  let val_bz = let b = rlp_get_next_bytes extra u0x20 in get_data b in (* ignore `bytes` prefix *)
-  let p = rlp_read_kind val_bz u0x00 in
-  match p with
-  | Pair size offset =>
-    let check = builtin rem size zion_address_length in
-    let throw_if_not_zero = builtin sub u0x00 check in
-    let length = builtin div size zion_address_length in
-    let initial = Nil {ByStr20} in
-    let count = builtin to_nat length in
-    let fold = @nat_fold (List ByStr20) in
-    let fn = fun (cur : List ByStr20) => fun (num : Nat) =>
-      let i = nat_to_int num in
-      let o = let n = builtin mul i zion_address_length in builtin add offset n in
-      let r = rlp_get_next_address val_bz o in
-      let val = get_address r in
-      Cons {ByStr20} val cur
-    in
-    (* array is constructed by pushing to the head of list - reverse to maintain right order *)
-    let array = fold fn initial count in
-    array
-  end
+  let p7 = let o = get_data_offset p6 in rlp_read_kind rawHeader o in (* position of Extra(with digest) *)
+  let p8 = let o1 = get_offset p7 in let o = builtin add o1 u0x20 in rlp_read_kind rawHeader o in (* position of Extra(without digest) , a bytes32 digest is appended before extra *)
+  let p9 = let o = get_offset p8 in rlp_read_kind rawHeader o in (* position of Extra.EpochStartHeight *)
+  let p10 = let o = get_data_offset p9 in rlp_get_next_uint64 rawHeader o in (* position of Extra.EpochEndHeight *)
+  let epoch_end_height_u64 = get_data_u64 p10 in
+  let epoch_end_height_u256 = grow_u64 epoch_end_height_u64 in
+  let val_bz = let o = get_offset_u64 p10 in let b = rlp_get_next_bytes rawHeader o in get_data b in
+  let size = builtin strlen val_bz in
+  let check = builtin rem size zion_address_length in
+  let throw_if_not_zero = builtin sub u0x00 check in
+  let length = builtin div size zion_address_length in
+  let initial = Nil {ByStr20} in
+  let count = builtin to_nat length in
+  let fold = @nat_fold (List ByStr20) in
+  let fn = fun (cur : List ByStr20) => fun (num : Nat) =>
+    let i = nat_to_int num in
+    let o = builtin mul i zion_address_length in
+    let r = rlp_get_next_address val_bz o in
+    let val = get_address r in
+    Cons {ByStr20} val cur
+  in
+  (* array is constructed by pushing to the head of list - reverse to maintain right order *)
+  let array = fold fn initial count in
+  Pair {Uint256 (List ByStr20)} epoch_end_height_u256 array
 
 let has_enough_signers : List ByStr20 -> List ByStr20 -> Bool =
   fun (validators : List ByStr20) =>
@@ -657,33 +685,24 @@ let has_enough_signers : List ByStr20 -> List ByStr20 -> Bool =
     *)
     let val_count = address_list_length validators in
     let required = let x = builtin mul val_count u0x02 in let y = builtin div x u0x03 in builtin add y u0x01 in
-    let acc = Pair {(List ByStr20) Uint32} signers u0x00 in (* unused signers, valid signature count *)
-    let fold = @list_foldl ByStr20 (Pair (List ByStr20) Uint32) in
-    let fold_fn = fun (acc : Pair (List ByStr20) Uint32) => fun (validator : ByStr20) =>
-      match acc with
-      | Pair remaining_signers signed_count =>
-        let finder = @list_exists ByStr20 in
-        let equality_fn = fun (signer : ByStr20) => builtin eq signer validator in
-        let found = finder equality_fn signers in
-        match found with
-        | True =>
-          (* NOTE: here we assume that all validators are unique, which should be ok? *)
-          let filter = @list_filter ByStr20 in
-          let new_remaining_signers = filter equality_fn remaining_signers in
-          let new_count = builtin add signed_count u0x01 in
-          Pair {(List ByStr20) Uint32} new_remaining_signers new_count
-        | False => acc (* no change if not found *)
-        end
+    let fold = @list_foldl ByStr20 Uint32 in
+    let fold_fn = fun (acc : Uint32) => fun (validator : ByStr20) =>
+      let finder = @list_exists ByStr20 in
+      let equality_fn = fun (signer : ByStr20) => builtin eq signer validator in
+      let found = finder equality_fn signers in
+      match found with
+      | True =>
+        (* NOTE: here we assume that all validators are unique, which should be ok? *)
+        (* if validators are not unique, have to filter signers list to prevent double counting *)
+        builtin add acc u0x01
+      | False => acc (* no change if not found *)
       end
     in
-    let res = fold fold_fn acc validators in
-    match res with
-    | Pair _ matched =>
-      let insufficient = builtin lt required matched in
-      match insufficient with
+    let matched = fold fold_fn u0x00 validators in
+    let insufficient = builtin lt required matched in
+    match insufficient with
       | True => False
       | False => True
-      end
     end
 
 let verify_seal : ByStr32 -> ByStr -> ByStr20 =
@@ -808,6 +827,12 @@ let abi_encode_bytes : ByStr -> ByStr =
     let data_bz = pad_bytes bz in
     builtin concat len_bz data_bz
 
+let abi_encode_u64 : Uint64 -> ByStr =
+  fun (num : Uint64) =>
+    let bz_8 = builtin to_bystr8 num in
+    let bz = builtin to_bystr bz_8 in
+    pad bz u0x20
+
 let abi_encode_packed : ByStr -> ByStr -> ByStr =
   fun (first : ByStr) =>
   fun (second : ByStr) =>
@@ -827,30 +852,32 @@ let encode_tx_param : TxParam -> ByStr =
       let t1 = abi_encode_bytes txHash in
       let t2 = abi_encode_bytes crossChainId in
       let t3 = abi_encode_bytes fromContract in
-      let t4 = builtin to_bystr empty_abi_encoded_string in
+      let t4 = abi_encode_u64 toChainId in
       let t5 = abi_encode_bytes toContract in
       let t6 = abi_encode_bytes method in
+      let t7 = abi_encode_bytes args in
       (* compute offsets *)
       let o1 = u0xe0 in (* initial offset of 7 x 32 = 224 bytes used for headers *)
       let o2 = next_offset o1 t1 in
       let o3 = next_offset o2 t2 in
-      let o4 = next_offset o3 t3 in
-      let o5 = next_offset o4 t4 in
+      let o5 = next_offset o3 t3 in
       let o6 = next_offset o5 t5 in
+      let o7 = next_offset o6 t6 in
       (* head: offsets *)
       let h1 = abi_encode_length o1 in
       let h2 = append_abi_encoded_length h1 o2 in
       let h3 = append_abi_encoded_length h2 o3 in
-      let h4 = append_abi_encoded_length h3 o4 in (* uint64 is a fixed type *)
+      let h4 = builtin concat h3 t4 in (* uint64 is a fixed type *)
       let h5 = append_abi_encoded_length h4 o5 in
       let h6 = append_abi_encoded_length h5 o6 in
+      let h7 = append_abi_encoded_length h6 o7 in
       (* combine head to with tail *)
-      let c1 = builtin concat h6 t1 in
+      let c1 = builtin concat h7 t1 in
       let c2 = builtin concat c1 t2 in
       let c3 = builtin concat c2 t3 in
-      let c4 = builtin concat c3 t4 in
-      let c5 = builtin concat c4 t5 in
-      builtin concat c5 t6
+      let c4 = builtin concat c3 t5 in
+      let c5 = builtin concat c4 t6 in
+      builtin concat c5 t7
     end
 
 let decode_tx_param : ByStr -> TxParam =
@@ -1303,9 +1330,11 @@ let verify_account_proof : ByStr -> ByStr -> ByStr20 -> ByStr -> ByStr -> ByStr 
 
 contract ZilCrossChainManagerV2(
   initial_owner: ByStr20,
+  init_proxy_address: ByStr20,
   eccd: ByStr20 with contract
     field cur_epoch_validators : List ByStr20,
     field cur_epoch_start_height : Uint256,
+    field cur_epoch_end_height : Uint256,
     field cur_to_zion_index : Uint256,
     field from_chain_tx_exists : Map Uint64 (Map ByStr32 Bool)
   end
@@ -1323,6 +1352,16 @@ procedure ThrowError(err : Error)
   throw e
 end
 
+procedure IsProxy()
+  is_proxy = builtin eq _sender init_proxy_address;
+  match is_proxy with
+  | True  =>
+  | False =>
+    err = CodeProxyValidationFailed;
+    ThrowError err
+  end
+end
+
 procedure IsNotEmptyVals(vals : List ByStr20)
   is_empty = let l = address_list_length vals in builtin eq l u0x00;
   match is_empty with
@@ -1333,6 +1372,30 @@ procedure IsNotEmptyVals(vals : List ByStr20)
   end
 end
 
+procedure RequireValidToContract(toContract : ByStr20)
+  is_proxy = builtin eq toContract init_proxy_address;
+  match is_proxy with
+  | True =>
+    err = CodeInvalidToContract;
+    ThrowError err
+  | False =>
+  end;
+  is_eccd = builtin eq toContract eccd;
+  match is_eccd with
+  | True =>
+    err = CodeInvalidToContract;
+    ThrowError err
+  | False =>
+  end;
+  is_self = builtin eq toContract _this_address;
+  match is_self with
+  | True =>
+    err = CodeInvalidToContract;
+    ThrowError err
+  | False =>
+  end
+end
+
 procedure ExecuteCrossChainTx(
   toContract : ByStr,
   method : ByStr,
@@ -1340,14 +1403,14 @@ procedure ExecuteCrossChainTx(
   fromContractAddr : ByStr,
   fromChainId : Uint64
 )
-  (* TODO: ensure to_contract is not proxy or data or this contract *)
   r = builtin to_bystr20 toContract;
   match r with
   | None =>
     err = CodeInvalidToContract;
     ThrowError err
   | Some recipient =>
-    tag = builtin to_string method;
+    RequireValidToContract recipient;
+    tag = builtin to_ascii method;
     msg_to_recipient =  {
       _tag : tag; _recipient: recipient; _amount: zero_amt;
       args: args; fromContractAddr: fromContractAddr; fromChainId: fromChainId
@@ -1402,6 +1465,7 @@ end
 transition InitGenesisBlock(
   rawHeader : ByStr
 )
+  IsProxy;
   header = decode_header rawHeader;
 
   (* verify isInit *)
@@ -1414,38 +1478,45 @@ transition InitGenesisBlock(
     ThrowError err
   end;
 
-  (* get validators *)
-  vals = get_validators_from_header rawHeader;
-  IsNotEmptyVals vals;
+  (* get validators and epoch_end_height *)
+  epoch_end_vals_pair = get_header_validators_and_epoch_end_height rawHeader;
+  match epoch_end_vals_pair with
+  | Pair epoch_end_height vals =>
+    IsNotEmptyVals vals;
 
-  (* put epoch information *)
-  number = get_number header;
-  start_height = builtin add one number;
-  msg_to_eccd =  {
-    _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
-    epoch_start_height: start_height; epoch_validators: vals
-  };
-  msgs = one_msg msg_to_eccd;
-  send msgs;
+    (* put epoch information *)
+    number = get_number header;
+    start_height = builtin add one number;
+    msg_to_eccd =  {
+      _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
+      epoch_start_height: start_height; epoch_end_height: epoch_end_height; epoch_validators: vals
+    };
+    msgs = one_msg msg_to_eccd;
+    send msgs;
 
-  e = {
-    _eventname: "GenesisBlockInitialized";
-    number: number; rawHeader: rawHeader
-  };
-  event e
+    e = {
+      _eventname: "GenesisBlockInitialized";
+      number: number; rawHeader: rawHeader
+    };
+    event e
+  end
 end
 
 transition ChangeEpoch(
   rawHeader : ByStr,
   rawSeals : ByStr
 )
+  IsProxy;
   header = decode_header rawHeader;
   number = get_number header;
 
   (* verify block.height *)
   cur_epoch_start_height <- & eccd.cur_epoch_start_height;
+  cur_epoch_end_height <- & eccd.cur_epoch_end_height;
   is_lower = builtin lt number cur_epoch_start_height;
-  match is_lower with
+  is_after = builtin lt cur_epoch_end_height number;
+  is_invalid = orb is_lower is_after;
+  match is_invalid with
   | False => (* ok*)
   | True =>
     err = CodeInvalidBlockHeight;
@@ -1453,39 +1524,43 @@ transition ChangeEpoch(
   end;
 
   (* verify header *)
-  new_vals = get_validators_from_header rawHeader;
-  IsNotEmptyVals new_vals;
-  prev_vals <- & eccd.cur_epoch_validators;
-  hash = builtin keccak256hash rawHeader;
-  ok = verify_header hash rawSeals prev_vals;
-  match ok with
-  | True => (* ok *)
-  | False =>
-    err = CodeHeaderVerificationFailed;
-    ThrowError err
-  end;
+  epoch_end_new_vals_pair = get_header_validators_and_epoch_end_height rawHeader;
+  match epoch_end_new_vals_pair with
+  | Pair epoch_end_height new_vals =>
+    IsNotEmptyVals new_vals;
+    prev_vals <- & eccd.cur_epoch_validators;
+    hash = builtin keccak256hash rawHeader;
+    ok = verify_header hash rawSeals prev_vals;
+    match ok with
+    | True => (* ok *)
+    | False =>
+      err = CodeHeaderVerificationFailed;
+      ThrowError err
+    end;
 
-  (* put new epoch information *)
-  start_height = builtin add one number;
-  msg_to_eccd =  {
-    _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
-    epoch_start_height: start_height; epoch_validators: new_vals
-  };
-  msgs = one_msg msg_to_eccd;
-  send msgs;
+    (* put new epoch information *)
+    start_height = builtin add one number;
+    msg_to_eccd =  {
+      _tag : "PutEpochInfo"; _recipient: eccd; _amount: zero_amt;
+      epoch_start_height: start_height; epoch_end_height: epoch_end_height; epoch_validators: new_vals
+    };
+    msgs = one_msg msg_to_eccd;
+    send msgs;
 
-  e = {
-    _eventname: "EpochChanged";
-    number: number; rawHeader: rawHeader; previousValidators: prev_vals; newValidators: new_vals
-  };
-  event e
+    e = {
+      _eventname: "EpochChanged";
+      number: number; rawHeader: rawHeader; previousValidators: prev_vals; newValidators: new_vals
+    };
+    event e
+  end
 end
 
 transition CrossChain(
   toChainId : Uint64,
   toContract : ByStr,
   method : ByStr,
-  txData : ByStr
+  txData : ByStr,
+  originContractAddr: ByStr20
 )
   (*
     require(CallerFactory(EthCrossChainCallerFactoryAddress).isChild(msg.sender), "The caller is child of the caller factory!");
@@ -1493,12 +1568,13 @@ transition CrossChain(
     bytes memory paramTxHash = ECCUtils.uint256ToBytes(txHashIndex);
     bytes memory crossChainId = abi.encodePacked(sha256(abi.encodePacked(address(this), paramTxHash)));
   *)
+  IsProxy;
   idx <- & eccd.cur_to_zion_index;
   idx_bz = let b = builtin to_bystr32 idx in builtin to_bystr b;
   id_bz = let a = builtin to_bystr _this_address in builtin concat a idx_bz;
   cross_chain_id = let hash = builtin keccak256hash id_bz in builtin to_bystr hash;
-  sender = builtin to_bystr _sender;
-  params = TxParam idx_bz cross_chain_id sender toChainId toContract method txData;
+  fromContract = builtin to_bystr originContractAddr;
+  params = TxParam idx_bz cross_chain_id fromContract toChainId toContract method txData;
   params_bz = encode_tx_param params;
   tx_hash = builtin keccak256hash params_bz;
 
@@ -1514,10 +1590,10 @@ transition CrossChain(
     _eventname : "CrossChainEvent";
     sender : _origin;
     txId : idx_bz;
-    proxyOrAssetContract : _sender;
+    proxyOrAssetContract : fromContract;
     toChainId : toChainId;
     toContract : toContract;
-    rawdata : params
+    rawdata : params_bz
   };
   event e
 end
@@ -1529,6 +1605,7 @@ transition VerifyHeaderAndExecuteTx(
   storageProof : ByStr,
   rawCrossTx : ByStr
 )
+  IsProxy;
   header = decode_header rawHeader;
   cross_tx = decode_cross_tx rawCrossTx;
   number = get_number header;
@@ -1536,8 +1613,11 @@ transition VerifyHeaderAndExecuteTx(
 
   (* verify block.height *)
   cur_epoch_start_height <- & eccd.cur_epoch_start_height;
+  cur_epoch_end_height <- & eccd.cur_epoch_end_height;
   is_lower = builtin lt number cur_epoch_start_height;
-  match is_lower with
+  is_after = builtin lt cur_epoch_end_height number;
+  is_invalid = orb is_lower is_after;
+  match is_invalid with
   | False => (* ok*)
   | True =>
     err = CodeInvalidBlockHeight;
@@ -1555,7 +1635,6 @@ transition VerifyHeaderAndExecuteTx(
     ThrowError err
   end;
 
-  (* TODO: verify proof *)
   (*
     bytes memory storageIndex = ECCUtils.getCrossTxStorageSlot(crossTx);
     bytes memory storageValue = ECCUtils.verifyAccountProof(accountProof, header.root, ZionCrossChainManagerAddress, storageProof, storageIndex);
@@ -1565,19 +1644,29 @@ transition VerifyHeaderAndExecuteTx(
   storage_index = get_cross_tx_storage_slot cross_tx;
   storage_value = verify_account_proof accountProof root zion_ccm_address storageProof storage_index;
   keccakCrossTx = builtin keccak256hash rawCrossTx;
-  maybe_storage_value_bystr32 = builtin to_bystr32 storage_value;
-  match maybe_storage_value_bystr32 with
-  | Some storage_value_bystr32 =>
-    isEqual = builtin eq keccakCrossTx storage_value_bystr32;
-    match isEqual with
-    | True =>
-    | False =>
+  (* if < 32 bytes, prepend till 32, if > 32 bytes, throw error *)
+  storage_value_len = builtin strlen storage_value;
+  storage_value_len_gt_32 = builtin lt u0x20 storage_value_len;
+  match storage_value_len_gt_32 with
+  | True =>
+    err = CodeVerifyProofFailed;
+    ThrowError err
+  | False =>
+    storage_value_padded = pad storage_value u0x20;
+    maybe_storage_value_bystr32 = builtin to_bystr32 storage_value_padded;
+    match maybe_storage_value_bystr32 with
+    | Some storage_value_bystr32 =>
+      isEqual = builtin eq keccakCrossTx storage_value_bystr32;
+      match isEqual with
+      | True => (* ok *)
+      | False =>
+        err = CodeVerifyProofFailed;
+        ThrowError err
+      end
+    | None =>
       err = CodeVerifyProofFailed;
       ThrowError err
     end
-  | None =>
-    err = CodeVerifyProofFailed;
-    ThrowError err
   end;
 
   match cross_tx with
